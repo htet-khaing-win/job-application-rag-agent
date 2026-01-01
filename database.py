@@ -152,18 +152,9 @@ def list_stored_resumes():
     Returns:
         List[str]: A sorted list of unique filenames found in metadata.
     """
-    results = index.query(
-        vector=[0.0] * 768, 
-        top_k=10000, 
-        include_metadata=True,
-        filter={"doc_type": "resume"}
-    )
-    
-    if not results['matches']:
-        return []
-    
-    unique_filenames = {match['metadata']['source'] for match in results['matches']}
-    return sorted(list(unique_filenames))
+    stats = index.describe_index_stats()
+    namespaces = stats.get('namespaces', {})
+    return sorted(list(namespaces.keys()))
 
 
 def delete_resume_from_pinecone(filename: str):
@@ -171,7 +162,7 @@ def delete_resume_from_pinecone(filename: str):
     Deletes all vector chunks associated with a specific filename.
     """
     try:
-        index.delete(filter={"source": filename})
+        index.delete(delete_all = True, namespace = filename)
         print(f"Deleted all chunks for {filename}")
         return True
     except Exception as e:
@@ -209,19 +200,24 @@ def retrieve_resumes_node(state: GraphState) -> GraphState:
     
     """
     query_vector = embeddings.embed_query(state.cleaned_jd)
-    results = index.query(
-        vector = query_vector,
-        top_k = 5,
-        include_metadata = True,
-        filter = {
-            "doc_type": "resume"
-        }
-    )
+    all_matches = []
+    resume_list = list_stored_resumes()
 
-    if not results['matches']:
-        print("No Matching Resumes found in Pinecone.")
-        return {"retrieved_chunks": [], "grading_feedback": "No resumes found in database."}
+    for names in resume_list:
+        resume = index.query(
+            vector = query_vector,
+            top_k = 10,
+            include_metadata = True,
+            namespace = names
+        )
+        all_matches.extend(resume['matches'])
 
-    retrieved_chunks = [match['metadata']['text'] for match in results['matches']]
+    # Sort  top 5 based on score
+    all_matches = sorted(all_matches, key=lambda x: x['score'], reverse=True)[:5]
+ 
+    if not all_matches:
+        print("No Matching Resumes found in any namespace.")
+        return {**state, "retrieved_chunks": [], "grading_feedback": "No resumes found."}
 
+    retrieved_chunks = [match['metadata']['text'] for match in all_matches]
     return {**state, "retrieved_chunks": retrieved_chunks}
