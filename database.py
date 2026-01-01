@@ -37,7 +37,7 @@ def clean_text(text):
 # Ingestion Flow 
 def ingest_resume_to_pinecone(file_path):
     """
-    The Librarian - Orchestrates the full document ingestion pipeline for the vector database.
+    Orchestrates the full document ingestion pipeline for the vector database.
     
     Purpose:
         - Automatically detects file format (PDF, DOCX, TXT) and extracts raw text.
@@ -76,7 +76,7 @@ def ingest_resume_to_pinecone(file_path):
     # Embedding & Upserting
     vectors = []
     for i, chunk in enumerate(chunks):
-        vector_val = embeddings_model.embed_query(chunk)
+        vector_val = embeddings.embed_query(chunk)
         vectors.append({
             "id": f"{os.path.basename(file_path)}_{i}", # Unique ID per chunk
             "values": vector_val,
@@ -89,6 +89,55 @@ def ingest_resume_to_pinecone(file_path):
     
     index.upsert(vectors=vectors)
     print(f" Successfully ingested: {file_path}")
+
+def list_stored_resumes():
+    """
+    Fetches a unique list of all resumes currently indexed in Pinecone.
+    
+    Returns:
+        List[str]: A sorted list of unique filenames found in metadata.
+    """
+    results = index.query(
+        vector=[0.0] * 768, 
+        top_k=10000, 
+        include_metadata=True,
+        filter={"doc_type": "resume"}
+    )
+    
+    if not results['matches']:
+        return []
+    
+    unique_filenames = {match['metadata']['source'] for match in results['matches']}
+    return sorted(list(unique_filenames))
+
+
+def delete_resume_from_pinecone(filename: str):
+    """
+    Deletes all vector chunks associated with a specific filename.
+    """
+    try:
+        index.delete(filter={"source": filename})
+        print(f"Deleted all chunks for {filename}")
+        return True
+    except Exception as e:
+        print(f"Error deleting {filename}: {str(e)}")
+        return False
+    
+def validate_resume_file(file_path):
+    """
+    Pre-flight check for file integrity and size.
+    """
+    valid_exts = ['.pdf','.docx','.txt']
+    ext = os.path.splitext(file_path)[-1].lower()
+
+    if ext not in valid_exts:
+        return False, "Unsupported file format."
+    
+    # Check size < 5MB
+    if os.path.getsize(file_path) > 5 * 1024 * 1024:
+        return False, "File too large (Max 5MB)."
+    
+    return True, "Completed"
 
 
 def retrieve_resumes_node(state: GraphState) -> GraphState:
