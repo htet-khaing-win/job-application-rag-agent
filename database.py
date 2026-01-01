@@ -203,6 +203,7 @@ def retrieve_resumes_node(state: GraphState) -> GraphState:
     all_matches = []
     resume_list = list_stored_resumes()
 
+    # Cross-namespace search
     for names in resume_list:
         resume = index.query(
             vector = query_vector,
@@ -219,5 +220,15 @@ def retrieve_resumes_node(state: GraphState) -> GraphState:
         print("No Matching Resumes found in any namespace.")
         return {**state, "retrieved_chunks": [], "grading_feedback": "No resumes found."}
 
-    retrieved_chunks = [match['metadata']['text'] for match in all_matches]
+    retrieved_chunks = [
+        {
+            "text": match["metadata"]["text"],
+            "source": match["metadata"]["source"],
+            "score": match["score"],
+            "chunk_id": match["id"]
+        }
+        for match in all_matches
+    ]
+
+    print(f" Retrieved {len(retrieved_chunks)} relevant chunks from {len(resume_list)} resumes.")
     return {**state, "retrieved_chunks": retrieved_chunks}
