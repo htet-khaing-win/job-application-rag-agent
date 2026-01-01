@@ -1,0 +1,123 @@
+import os
+from dotenv import load_dotenv
+from pinecone import Pinecone, SeverlessSpec
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from state import GraphState
+from docx import Document
+import pdfplumber
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+load_dotenv()
+
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+index = pc.Index("resume-index")
+
+embeddings = GoogleGenerativeAIEmbeddings(
+    model="models/text-embedding-004",
+    google_api_key=os.getenv("API_KEY") 
+)
+
+
+# Helpers
+def parse_pdf(file_path):
+    text = ""
+    with pdfplumber.open(file_path) as pdf:
+        for page in pdf.pages:
+            content = page.extract_text()
+            if content: text += content + "\n"
+    return text
+
+def parse_docx(file_path):
+    doc = Document(file_path)
+    return "\n".join(p.text for p in doc.paragraphs)
+
+def clean_text(text):
+    return " ".join(text.split()).strip()
+
+# Ingestion Flow 
+def ingest_resume_to_pinecone(file_path):
+    """
+    The Librarian - Orchestrates the full document ingestion pipeline for the vector database.
+    
+    Purpose:
+        - Automatically detects file format (PDF, DOCX, TXT) and extracts raw text.
+        - Standardizes text by removing excessive whitespace and formatting artifacts.
+        - Breaks down long resumes into semantically meaningful chunks to respect LLM context limits.
+        - Transforms text chunks into high-dimensional vectors using Google Gemini Embeddings.
+        - Upserts vectors into Pinecone with associated metadata for filtered retrieval.
+
+    Process Flow:
+        1. Parse: Extract content based on file extension.
+        2. Clean: Normalize text for better embedding quality.
+        3. Split: Segment text using RecursiveCharacterTextSplitter (500 chars, 80 overlap).
+        4. Vectorize: Generate 768-dimension embeddings for each segment.
+        5. Storage: Batch upload to Pinecone with source tracking.
+
+    Input: 
+        - file_path (str): Absolute or relative path to the candidate's resume file.
+        
+    Side Effects: 
+        - Updates the Pinecone 'resume-index' with new vector entries.
+    """
+    ext = os.path.splitext(file_path)[-1].lower()
+    
+    if ext == ".pdf": text = parse_pdf(file_path)
+    elif ext == ".docx": text = parse_docx(file_path)
+    else: # txt
+        with open(file_path, "r", encoding="utf-8") as f:
+            text = f.read()
+
+    cleaned = clean_text(text)
+    
+    # Chunking
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks = splitter.split_text(cleaned)
+    
+    # Embedding & Upserting
+    vectors = []
+    for i, chunk in enumerate(chunks):
+        vector_val = embeddings_model.embed_query(chunk)
+        vectors.append({
+            "id": f"{os.path.basename(file_path)}_{i}", # Unique ID per chunk
+            "values": vector_val,
+            "metadata": {
+                "text": chunk, 
+                "source": os.path.basename(file_path),
+                "doc_type": "resume"
+            }
+        })
+    
+    index.upsert(vectors=vectors)
+    print(f" Successfully ingested: {file_path}")
+
+
+def retrieve_resumes_node(state: GraphState) -> GraphState:
+    """
+    The Researcher - Queries Pinecone vector database for relevant resume chunks.
+    
+    Purpose:
+        - Embeds the cleaned JD into vector space
+        - Retrieves top-K most relevant resume sections from Pinecone
+        - Returns ranked candidate data for grading
+    
+    Input: state.cleaned_jd - Processed job description
+    Output: state.retrieved_chunks - List of resume text chunks with scores
+    
+    """
+    query_vector = embeddings.embed_query(state.cleaned_jd)
+    results = index.query(
+        vector = query_vector,
+        top_k = 5,
+        include_metadata = True,
+        filter = {
+            "doc_type": "resume"
+        }
+    )
+
+    if not results['matches']:
+        print("No Matching Resumes found in Pinecone.")
+        return {"retrieved_chunks": [], "grading_feedback": "No resumes found in database."}
+
+    retrieved_chunks = [match['metadata']['text'] for match in results['matches']]
+
+    return {**state, "retrieved_chunks": retrieved_chunks}
