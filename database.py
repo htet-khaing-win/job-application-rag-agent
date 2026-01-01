@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from pinecone import Pinecone, SeverlessSpec
+from pinecone import Pinecone, ServerlessSpec
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from state import GraphState
 from docx import Document
@@ -11,7 +11,43 @@ import time
 load_dotenv()
 
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index = pc.Index("resume-index")
+
+
+def get_index(index_name: str, dimension: int = 768):
+    """
+    Ensures the Pinecone vector infrastructure is ready.
+    
+    Purpose:
+        - Prevents 'Index Not Found' errors by auto-provisioning.
+        - Ensures dimension matches our Google Gemini Embedding model (768).
+        - Configures ServerlessSpec for cost-effective scaling.
+    """
+    existing_indexes = [idx.name for idx in pc.list_indexes()]
+
+    if index_name not in existing_indexes:
+        print(f"Creating new index: {index_name}")
+        pc.create_index(
+            name = index_name,
+            dimension = dimension,
+            metric = "cosine",
+            spec = ServerlessSpec(
+                cloud="aws", 
+                region="us-east-1"
+            )
+        )
+
+        while not pc.describe_index(index_name).status['ready']:
+            time.sleep(1)
+        print(f"Index {index_name} is ready")
+
+    else:
+        desc = pc.describe_index(index_name)
+        if desc.dimension != dimension:
+            raise ValueError(f"Index dimension mismatch! Expected {dimension}, found {desc.dimension}")
+        print(f" Connected to existing index: {index_name}")
+    return pc.Index(index_name)
+
+index = get_index(index_name="resume-index", dimension=768)
 
 embeddings = GoogleGenerativeAIEmbeddings(
     model="models/text-embedding-004",
