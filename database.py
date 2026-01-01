@@ -6,6 +6,7 @@ from state import GraphState
 from docx import Document
 import pdfplumber
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+import time
 
 load_dotenv()
 
@@ -59,11 +60,18 @@ def ingest_resume_to_pinecone(file_path):
     Side Effects: 
         - Updates the Pinecone 'resume-index' with new vector entries.
     """
+
+    filename = os.path.basename(file_path)
     ext = os.path.splitext(file_path)[-1].lower()
-    
+
+    #pdf
     if ext == ".pdf": text = parse_pdf(file_path)
+
+    # docs
     elif ext == ".docx": text = parse_docx(file_path)
-    else: # txt
+
+    # txt
+    else: 
         with open(file_path, "r", encoding="utf-8") as f:
             text = f.read()
 
@@ -73,22 +81,33 @@ def ingest_resume_to_pinecone(file_path):
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     chunks = splitter.split_text(cleaned)
     
+    # Cascading Delete (Deleting Chunks if the upload file has the same name)
+    print(f" Checking for existing records of {filename}...")
+    try:
+        # deleting chunks using metadata filter
+        index.delete(filter={"source": filename})
+    except Exception as e:
+        print(f" Clean-up note: {str(e)}")
+
+
     # Embedding & Upserting
     vectors = []
-    for i, chunk in enumerate(chunks):
-        vector_val = embeddings.embed_query(chunk)
+    embedded_chunks = embeddings.embed_documents(chunks)
+
+    for i, (chunk, vector_val) in enumerate(zip(chunks, embedded_chunks)):
         vectors.append({
-            "id": f"{os.path.basename(file_path)}_{i}", # Unique ID per chunk
+            "id": f"{filename}#{i}", # "#" symbol is there for ID to be more deterministic
             "values": vector_val,
             "metadata": {
                 "text": chunk, 
-                "source": os.path.basename(file_path),
-                "doc_type": "resume"
+                "source": filename,
+                "doc_type": "resume",
+                "ingested_at": time.time() 
             }
         })
     
     index.upsert(vectors=vectors)
-    print(f" Successfully ingested: {file_path}")
+    print(f" Successfully ingested: {filename}")
 
 def list_stored_resumes():
     """
