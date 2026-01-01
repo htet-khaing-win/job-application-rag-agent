@@ -120,10 +120,8 @@ def ingest_resume_to_pinecone(file_path):
     # Cascading Delete (Deleting Chunks if the upload file has the same name)
     print(f" Checking for existing records of {filename}...")
     try:
-        # deleting chunks using metadata filter
-        index.delete(filter={"source": filename})
-    except Exception as e:
-        print(f" Clean-up note: {str(e)}")
+        index.delete(delete_all=True, namespace=filename)
+    except Exception: pass
 
 
     # Embedding & Upserting
@@ -142,7 +140,7 @@ def ingest_resume_to_pinecone(file_path):
             }
         })
     
-    index.upsert(vectors=vectors)
+    index.upsert(vectors=vectors, namespace=filename)
     print(f" Successfully ingested: {filename}")
 
 def list_stored_resumes():
@@ -203,32 +201,63 @@ def retrieve_resumes_node(state: GraphState) -> GraphState:
     all_matches = []
     resume_list = list_stored_resumes()
 
+    if not resume_list:
+        print(" No resumes found in database.")
+        return {
+            **state, 
+            "retrieved_chunks": [], 
+            "grading_feedback": "Database is empty. Please upload resumes first."
+        }
+
     # Cross-namespace search
     for names in resume_list:
-        resume = index.query(
-            vector = query_vector,
-            top_k = 10,
-            include_metadata = True,
-            namespace = names
-        )
-        all_matches.extend(resume['matches'])
+        try:
+            resume = index.query(
+                vector = query_vector,
+                top_k = 10,
+                include_metadata = True,
+                namespace = names
+            )
+            all_matches.extend(resume['matches'])
+        except Exception as e:
+            print(f"Error querying namespace {names}: {str(e)}")
 
     # Sort  top 5 based on score
-    all_matches = sorted(all_matches, key=lambda x: x['score'], reverse=True)[:5]
- 
-    if not all_matches:
-        print("No Matching Resumes found in any namespace.")
-        return {**state, "retrieved_chunks": [], "grading_feedback": "No resumes found."}
+    RELEVANCE_THRESHOLD = 0.65
+    valid_matches = [m for m in all_matches if m['score'] >= RELEVANCE_THRESHOLD]
+
+    if not valid_matches:
+        return {**state, "retrieved_chunks": [], "relevance_score": 0, "grading_feedback": "No relevant matches."}
+
+    # Aggregation per Resume (Diversity)
+    sorted_matches = sorted(valid_matches, key=lambda x: x['score'], reverse=True)
+
+    final_matches = sorted_matches[:5]
+
+    if not final_matches:
+        print(" No matches passed the relevance threshold.")
+        return {
+            **state, 
+            "retrieved_chunks": [], 
+            "grading_feedback": "Mismatch: No resumes are sufficiently relevant to this JD.",
+            "relevance_score": 0 # Fallback Signal
+        }
 
     retrieved_chunks = [
         {
-            "text": match["metadata"]["text"],
-            "source": match["metadata"]["source"],
-            "score": match["score"],
-            "chunk_id": match["id"]
+            "text": m["metadata"]["text"],
+            "source": m["metadata"]["source"],
+            "score": round(m["score"], 4),
+            "chunk_id": m["id"]
         }
-        for match in all_matches
+        for m in final_matches 
     ]
 
-    print(f" Retrieved {len(retrieved_chunks)} relevant chunks from {len(resume_list)} resumes.")
-    return {**state, "retrieved_chunks": retrieved_chunks}
+    max_score = round(final_matches[0]['score'] * 100, 2)
+
+    print(f" Retrieved {len(retrieved_chunks)} relevant chunks. Top Match Score: {max_score}%.")
+    return {
+        **state, 
+        "retrieved_chunks": retrieved_chunks, 
+        "relevance_score": max_score
+    }
