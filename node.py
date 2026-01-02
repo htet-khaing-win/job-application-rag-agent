@@ -57,6 +57,64 @@ def ingest_jd_node(state: GraphState, llm) -> GraphState:
         "is_valid_jd": True
     }
 
+def fallback_handler_node(state: GraphState, llm) -> GraphState:
+    """
+    Handles invalid inputs and severe mismatches.
+    
+    Purpose:
+        - Provides helpful error messages
+        - Guides user back to valid JD input
+        - Prevents hallucinated cover letters
+    
+    Triggers:
+        - state.is_valid_jd == False (invalid input)
+        - state.error_type == "no_resumes" (empty database)
+        - state.relevance_score < 50 after 2 rewrites (severe mismatch)
+    """
+    
+    if state.error_type == "invalid_input":
+        message = f"""
+I couldn't identify this as a job description. 
+
+To generate a cover letter, please paste:
+- A complete job posting
+- The job requirements section
+- Or describe the role you're applying for
+
+"""
+    
+    elif state.error_type == "no_resumes":
+        message = """
+No resumes found in the system.
+
+Please upload your resume first using the file upload feature, then paste the job description again.
+"""
+    
+    elif state.relevance_score < 50:
+        message = f"""
+I couldn't find a strong match between your resumes and this job description (relevance: {state.relevance_score}%).
+
+Suggestions:
+- Upload a more relevant resume for this role
+- Ensure the job description is complete and specific
+- Try a different position that better matches your background
+
+Would you like to try a different job description?
+"""
+    
+    else:
+        # Generic fallback for unexpected errors
+        message = """
+I specialize in generating cover letters based on job descriptions.
+
+Please paste a job description, and I'll create a tailored cover letter using your uploaded resume(s).
+"""
+    
+    return {
+        **state,
+        "final_response": message,
+        "is_fallback": True
+    }
 
 # GRADE RETRIEVAL (The Critic)
 def grade_retrieval_node(state: GraphState, llm) -> GraphState:
