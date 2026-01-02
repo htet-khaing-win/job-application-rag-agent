@@ -9,10 +9,17 @@ def should_rewrite_query(state: GraphState) -> str:
     """
     If the retrieval quality is poor, route to rewrite_query, else continue.
     """
-    if state.needs_rewrite:
-        return "rewrite_query"
+    MAX_REWRITES = 2
+    # If quality is acceptable, proceed
+    if not state.needs_rewrite:
+        return "generate_summary"
     
-    return "generate_summary"
+    # If exhausted rewrites, trigger fallback
+    if state.refinement_count >= MAX_REWRITES:
+        return "fallback_handler"
+    
+    # Otherwise, retry retrieval with adjusted query
+    return "rewrite_query"
 
 def should_refine_letter(state: GraphState) -> str:
     """
