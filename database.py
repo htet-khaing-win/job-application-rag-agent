@@ -184,7 +184,7 @@ def validate_resume_file(file_path):
     return True, "Completed"
 
 
-def retrieve_resumes_node(state: GraphState) -> GraphState:
+def retrieve_resumes_node(state: GraphState, llm) -> GraphState:
     """
     The Researcher - Queries Pinecone vector database for relevant resume chunks.
     
@@ -206,6 +206,7 @@ def retrieve_resumes_node(state: GraphState) -> GraphState:
         return {
             **state, 
             "retrieved_chunks": [], 
+            "error_type": "no_resumes",
             "grading_feedback": "Database is empty. Please upload resumes first."
         }
 
@@ -227,11 +228,13 @@ def retrieve_resumes_node(state: GraphState) -> GraphState:
     valid_matches = [m for m in all_matches if m['score'] >= RELEVANCE_THRESHOLD]
 
     if not valid_matches:
-        return {**state, "retrieved_chunks": [], "relevance_score": 0, "grading_feedback": "No relevant matches."}
+        return {**state, 
+                "retrieved_chunks": [], 
+                "relevance_score": 0, 
+                "grading_feedback": "No relevant matches."}
 
     # Aggregation per Resume (Diversity)
     sorted_matches = sorted(valid_matches, key=lambda x: x['score'], reverse=True)
-
     final_matches = sorted_matches[:5]
 
     if not final_matches:
@@ -254,10 +257,12 @@ def retrieve_resumes_node(state: GraphState) -> GraphState:
     ]
 
     max_score = round(final_matches[0]['score'] * 100, 2)
-
     print(f" Retrieved {len(retrieved_chunks)} relevant chunks. Top Match Score: {max_score}%.")
+
+    rewrite_count = state.rewrite_count + 1 if state.needs_rewrite else state.rewrite_count
     return {
         **state, 
         "retrieved_chunks": retrieved_chunks, 
-        "relevance_score": max_score
+        "relevance_score": max_score,
+        "rewrite_count": rewrite_count
     }
