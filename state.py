@@ -14,8 +14,9 @@ class GraphState(BaseModel):
     needs_rewrite: bool = False
     grading_feedback: str = ""
     needs_refinement: bool = False
-    refinement_count: int = 0
+    refinement_count: int = 0 # Tracks the times Agent rewrite the leeter based on critique feedback
     error_type: str = ""            
     error_message: str = ""         
     is_fallback: bool = False       
-    final_response: str = ""
+    final_response: str = "" 
+    rewrite_count: int = 0  # Tracks the times Agent re-query Pinecone due to jd and resume mismatch
