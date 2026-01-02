@@ -7,24 +7,35 @@ from state import GraphState
 
 # INGEST JOB DESCRIPTION (Entry Node)
 def ingest_jd_node(state: GraphState, llm) -> GraphState:
-    """
-    The Cleaner - Prepares the Job Description for optimal processing.
+
+    validation_prompt = f"""
+    ROLE: Input Validator
     
-    Purpose:
-        - Removes HR boilerplate and generic filler text
-        - Extracts core requirements and target keywords
-        - Formats Job Description for effective Pinecone embedding/retrieval
+    TASK: Determine if this text is a job description or job-related query.
     
-    Input: state.job_description - Raw JD text
-    Output: state.cleaned_jd - Structured, focused JD text
+    INPUT: {state.job_description}
+    
+    CRITERIA:
+    - Contains job requirements, qualifications, or responsibilities
+    - Mentions a role title or position
+    - Describes company needs or hiring context
+    
+    OUTPUT: Return ONLY one word: VALID or INVALID
     """
-    prompt = f"""
+    if validation_prompt == "INVALID":
+        return {
+            **state,
+            "is_valid_jd": False,
+            "error_type": "invalid_input",
+            "error_message": "This request doesn't appears to be a job description. Please paste a complete job posting."
+        }
+    
+    cleaning_prompt = f"""
     ROLE: You are an expert HR Document Analyst with 10+ years of experience parsing job descriptions.
     
     TASK: Clean and extract the essential components from this Job Description.
     
-    INPUT - Job Description:
-    {state.job_description}
+    INPUT - Job Description: {state.job_description}
     
     INSTRUCTIONS:
     1. Remove generic HR language ("competitive salary", "great culture", etc.)
@@ -38,9 +49,13 @@ def ingest_jd_node(state: GraphState, llm) -> GraphState:
     Key Responsibilities: [Primary job duties]
     Target Keywords: [Comma-separated list of critical terms for matching]
     """
-    response = llm.invoke(prompt)
-    return {"cleaned_jd": response.content}
-
+    
+    response = llm.invoke(cleaning_prompt)
+    return {
+        **state,
+        "cleaned_jd": response.content,
+        "is_valid_jd": True
+    }
 
 
 # GRADE RETRIEVAL (The Critic)
@@ -65,11 +80,9 @@ def grade_retrieval_node(state: GraphState, llm) -> GraphState:
     
     TASK: Grade the relevance of retrieved resume content against job requirements.
     
-    INPUT - Job Requirements:
-    {state.cleaned_jd}
+    INPUT - Job Requirements: {state.cleaned_jd}
     
-    INPUT - Retrieved Resume Chunks:
-    {state.retrieved_chunks}
+    INPUT - Retrieved Resume Chunks: {state.retrieved_chunks}
     
     INSTRUCTIONS:
     1. Score each chunk on relevance (0-100)
@@ -117,11 +130,9 @@ def generate_summary_node(state: GraphState, llm) -> GraphState:
     
     TASK: Create a comprehensive candidate-job match analysis.
     
-    INPUT - Job Requirements:
-    {state.cleaned_jd}
+    INPUT - Job Requirements: {state.cleaned_jd}
     
-    INPUT - Candidate Resume Data:
-    {state.retrieved_chunks}
+    INPUT - Candidate Resume Data: {state.retrieved_chunks}
     
     INSTRUCTIONS:
     1. Map candidate's top 5 achievements to specific job requirements
@@ -160,11 +171,9 @@ def write_cover_letter_node(state: GraphState, llm) -> GraphState:
     
     TASK: Write a compelling, ATS-optimized cover letter.
     
-    INPUT - Candidate Summary:
-    {state.candidate_summary}
+    INPUT - Candidate Summary: {state.candidate_summary}
     
-    INPUT - Job Requirements:
-    {state.cleaned_jd}
+    INPUT - Job Requirements: {state.cleaned_jd}
     
     INSTRUCTIONS:
     1. Opening: Hook with specific company research or mutual connection or offer solution for specific problem mentioned in the Job Description
@@ -208,11 +217,9 @@ def critique_letter_node(state: GraphState, llm) -> GraphState:
     
     TASK: Critique this cover letter against the job requirements.
     
-    INPUT - Cover Letter:
-    {state.cover_letter}
+    INPUT - Cover Letter: {state.cover_letter}
     
-    INPUT - Job Requirements:
-    {state.cleaned_jd}
+    INPUT - Job Requirements: {state.cleaned_jd}
     
     EVALUATION CRITERIA:
     1. Specificity: Are claims backed by concrete examples/metrics?
@@ -263,11 +270,9 @@ def refine_letter_node(state: GraphState, llm) -> GraphState:
     
     TASK: Revise this cover letter based on the provided critique.
     
-    INPUT - Current Draft:
-    {state.cover_letter}
+    INPUT - Current Draft: {state.cover_letter}
     
-    INPUT - Critique Feedback:
-    {state.critique_feedback}
+    INPUT - Critique Feedback: {state.critique_feedback}
     
     INSTRUCTIONS:
     1. Address EVERY issue listed in "Issues to Fix"
