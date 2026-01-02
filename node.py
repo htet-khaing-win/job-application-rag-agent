@@ -3,6 +3,8 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 import os
 from dotenv import load_dotenv
 from state import GraphState
+import json
+import re
 
 
 # INGEST JOB DESCRIPTION (Entry Node)
@@ -74,41 +76,41 @@ def fallback_handler_node(state: GraphState, llm) -> GraphState:
     
     if state.error_type == "invalid_input":
         message = f"""
-I couldn't identify this as a job description. 
+    I couldn't identify this as a job description. 
 
-To generate a cover letter, please paste:
-- A complete job posting
-- The job requirements section
-- Or describe the role you're applying for
+    To generate a cover letter, please paste:
+    - A complete job posting
+    - The job requirements section
+    - Or describe the role you're applying for
 
-"""
+    """
     
     elif state.error_type == "no_resumes":
         message = """
-No resumes found in the system.
+    No resumes found in the system.
 
-Please upload your resume first using the file upload feature, then paste the job description again.
-"""
+    Please upload your resume first using the file upload feature, then paste the job description again.
+    """
     
     elif state.relevance_score < 50:
         message = f"""
-I couldn't find a strong match between your resumes and this job description (relevance: {state.relevance_score}%).
+    I couldn't find a strong match between your resumes and this job description (relevance: {state.relevance_score}%).
 
-Suggestions:
-- Upload a more relevant resume for this role
-- Ensure the job description is complete and specific
-- Try a different position that better matches your background
+    Suggestions:
+    - Upload a more relevant resume for this role
+    - Ensure the job description is complete and specific
+    - Try a different position that better matches your background
 
-Would you like to try a different job description?
-"""
+    Would you like to try a different job description?
+    """
     
     else:
         # Generic fallback for unexpected errors
         message = """
-I specialize in generating cover letters based on job descriptions.
+    I specialize in generating cover letters based on job descriptions.
 
-Please paste a job description, and I'll create a tailored cover letter using your uploaded resume(s).
-"""
+    Please paste a job description, and I'll create a tailored cover letter using your uploaded resume(s).
+    """
     
     return {
         **state,
@@ -120,18 +122,6 @@ Please paste a job description, and I'll create a tailored cover letter using yo
 def grade_retrieval_node(state: GraphState, llm) -> GraphState:
     """
     The Critic - Evaluates quality of retrieved resume matches.
-    
-    Purpose:
-        - Scores each retrieved chunk against Job Description requirements
-        - Determines if results meet quality threshold (e.g., >70% relevance)
-        - Triggers rewrite_query if quality is insufficient
-    
-    Input: 
-        - state.cleaned_jd - Target job requirements
-        - state.retrieved_chunks - Candidate resume data
-    Output: 
-        - state['relevance_score'] - Overall match quality (0-100)
-        - state['needs_rewrite'] - Boolean flag for query refinement
     """
     prompt = f"""
     ROLE: You are a Technical Recruiter with expertise in candidate-role matching.
@@ -143,27 +133,56 @@ def grade_retrieval_node(state: GraphState, llm) -> GraphState:
     INPUT - Retrieved Resume Chunks: {state.retrieved_chunks}
     
     INSTRUCTIONS:
-    1. Score each chunk on relevance (0-100)
-    2. Check for critical skill gaps
-    3. Calculate overall match percentage
-    4. Determine if results are sufficient to proceed (threshold: 70%)
+    1. Score the *collective* quality of the chunks on relevance (0-100).
+    2. A score < 70 indicates a mismatch or missing critical skills.
+    3. Provide brief reasoning.
     
     OUTPUT FORMAT:
-    Score: [0-100]
-    Needs Rewrite: [YES/NO]
-    Reasoning: [Brief explanation]
+    You must return a valid JSON object with these exact keys:
+    {{
+        "score": (int 0-100),
+        "needs_rewrite": (bool),
+        "reasoning": (str)
+    }}
+    Do not add markdown formatting like ```json or any other text.
     """
+    
     response = llm.invoke(prompt)
+    content = response.content.strip()
     
-    # Parse response to extract score and rewrite flag
-    content = response.content
-    score = 75  # TODO: Extract from LLM response
-    needs_rewrite = "NO" in content.upper()
-    
+    # PARSING LOGIC
+    try:
+        # Direct JSON load
+        data = json.loads(content)
+        score = int(data.get("score", 0))
+        needs_rewrite = data.get("needs_rewrite", False)
+        reasoning = data.get("reasoning", "No reasoning provided.")
+        
+    except json.JSONDecodeError:
+        # Fallback regex extraction if LLM adds extra text
+        print("Warning: Failed to parse JSON directly. Attempting regex fallback.")
+        
+        # Extract Score
+        score_match = re.search(r'"score":\s*(\d+)', content)
+        score = int(score_match.group(1)) if score_match else 0
+        
+        # Extract Rewrite Flag
+        rewrite_match = re.search(r'"needs_rewrite":\s*(true|false)', content, re.IGNORECASE)
+        if rewrite_match:
+            needs_rewrite = rewrite_match.group(1).lower() == 'true'
+        else:
+            # if score is low, force rewrite
+            needs_rewrite = score < 70
+            
+        reasoning = "Parsing error: " + content[:100] + "..."
+
+    print(f"Grading Result: Score={score}, Rewrite={needs_rewrite}")
+
     return {
+        **state,
         "relevance_score": score,
         "needs_rewrite": needs_rewrite,
-        "grading_feedback": content
+        "grading_feedback": reasoning
     }
 
 
