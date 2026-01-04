@@ -14,7 +14,7 @@ class GraphState(BaseModel):
     needs_rewrite: bool = False
     grading_feedback: str = ""
     needs_refinement: bool = False
-    refinement_count: int = 0 # Tracks the times Agent rewrite the leeter based on critique feedback
+    refinement_count: int = 0 # Tracks the times Agent rewrite the letter based on critique feedback
     error_type: str = ""            
     error_message: str = ""         
     is_fallback: bool = False       
