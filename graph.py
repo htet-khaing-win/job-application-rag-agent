@@ -1,7 +1,7 @@
 from state import GraphState
 from functools import partial
 from langgraph.graph import StateGraph, END, START
-from node import ingest_jd_node, grade_retrieval_node, generate_summary_node, write_cover_letter_node, critique_letter_node, refine_letter_node, fallback_handler_node
+from node import ingest_jd_node, grade_retrieval_node, generate_summary_node, write_cover_letter_node, critique_letter_node, refine_letter_node, fallback_handler_node, rewrite_query_node
 from database import retrieve_resumes_node
 from IPython.display import display, Image
 
@@ -49,6 +49,7 @@ def build_graph(llm):
     # Nodes
     workflow.add_node("ingest_jd", partial(ingest_jd_node, llm=llm))
     workflow.add_node("fallback_handler", partial(fallback_handler_node, llm=llm))
+    workflow.add_node("rewrite_query", partial(rewrite_query_node, llm=llm))
     workflow.add_node("retrieve_resumes", partial(retrieve_resumes_node, llm=llm))
     workflow.add_node("grade_retrieval", partial(grade_retrieval_node, llm=llm))
     workflow.add_node("generate_summary", partial(generate_summary_node, llm=llm))
@@ -71,7 +72,7 @@ def build_graph(llm):
         "grade_retrieval",
         should_rewrite_query,
         {
-            "rewrite_query": "retrieve_resumes",  
+            "rewrite_query": "rewrite_query",  
             "generate_summary": "generate_summary",
             "fallback_handler": "fallback_handler"
         }
