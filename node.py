@@ -24,7 +24,8 @@ def ingest_jd_node(state: GraphState, llm) -> GraphState:
     
     OUTPUT: Return ONLY one word: VALID or INVALID
     """
-    if validation_prompt == "INVALID":
+    validation_response = llm.invoke(validation_prompt)
+    if "INVALID" in validation_response.content.upper():
         return {
             **state,
             "is_valid_jd": False,
