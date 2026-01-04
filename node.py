@@ -160,7 +160,7 @@ def grade_retrieval_node(state: GraphState, llm) -> dict:
         else:
             needs_rewrite = score < 70
         reasoning = data.get("reasoning", "No reasoning provided.")
-        
+
     except json.JSONDecodeError:
         # Fallback regex extraction if LLM adds extra text
         print("Warning: Failed to parse JSON directly. Attempting regex fallback.")
@@ -370,5 +370,21 @@ def refine_letter_node(state: GraphState, llm) -> dict:
     return {
         "cover_letter": response.content,
         "refinement_count": current_count
+    }
+
+def rewrite_query_node(state: GraphState, llm) -> dict:
+    """Uses LLM to improve the search query based on critic feedback."""
+    prompt = f"""
+    The previous search for resumes failed. 
+    Original Query: {state.cleaned_jd}
+    Critic Feedback: {state.grading_feedback}
+    
+    Task: Rewrite the search query to be more effective at finding relevant resume chunks in a vector database.
+    Focus on technical keywords and core requirements.
+    """
+    response = llm.invoke(prompt)
+    return {
+        "cleaned_jd": response.content,
+        "rewrite_count": state.rewrite_count + 1 
     }
 
