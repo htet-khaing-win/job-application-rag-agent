@@ -15,7 +15,7 @@ def should_rewrite_query(state: GraphState) -> str:
         return "generate_summary"
     
     # If exhausted rewrites, trigger fallback
-    if state.refinement_count >= MAX_REWRITES:
+    if state.rewrite_count >= MAX_REWRITES:
         return "fallback_handler"
     
     # Otherwise, retry retrieval with adjusted query
