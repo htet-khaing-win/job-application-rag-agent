@@ -8,7 +8,7 @@ import re
 
 
 # INGEST JOB DESCRIPTION (Entry Node)
-def ingest_jd_node(state: GraphState, llm) -> GraphState:
+def ingest_jd_node(state: GraphState, llm) -> dict:
 
     validation_prompt = f"""
     ROLE: Input Validator
@@ -27,7 +27,6 @@ def ingest_jd_node(state: GraphState, llm) -> GraphState:
     validation_response = llm.invoke(validation_prompt)
     if "INVALID" in validation_response.content.upper():
         return {
-            **state,
             "is_valid_jd": False,
             "error_type": "invalid_input",
             "error_message": "This request doesn't appears to be a job description. Please paste a complete job posting."
@@ -55,7 +54,6 @@ def ingest_jd_node(state: GraphState, llm) -> GraphState:
     
     response = llm.invoke(cleaning_prompt)
     return {
-        **state,
         "cleaned_jd": response.content,
         "is_valid_jd": True
     }
