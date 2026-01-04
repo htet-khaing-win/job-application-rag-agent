@@ -58,7 +58,7 @@ def ingest_jd_node(state: GraphState, llm) -> dict:
         "is_valid_jd": True
     }
 
-def fallback_handler_node(state: GraphState, llm) -> GraphState:
+def fallback_handler_node(state: GraphState, llm) -> dict:
     """
     Handles invalid inputs and severe mismatches.
     
@@ -112,13 +112,12 @@ def fallback_handler_node(state: GraphState, llm) -> GraphState:
     """
     
     return {
-        **state,
         "final_response": message,
         "is_fallback": True
     }
 
 # GRADE RETRIEVAL (The Critic)
-def grade_retrieval_node(state: GraphState, llm) -> GraphState:
+def grade_retrieval_node(state: GraphState, llm) -> dict:
     """
     The Critic - Evaluates quality of retrieved resume matches.
     """
@@ -178,7 +177,6 @@ def grade_retrieval_node(state: GraphState, llm) -> GraphState:
     print(f"Grading Result: Score={score}, Rewrite={needs_rewrite}")
 
     return {
-        **state,
         "relevance_score": score,
         "needs_rewrite": needs_rewrite,
         "grading_feedback": reasoning
@@ -186,7 +184,7 @@ def grade_retrieval_node(state: GraphState, llm) -> GraphState:
 
 
 # GENERATE SUMMARY (The Analyst)
-def generate_summary_node(state: GraphState, llm) -> GraphState:
+def generate_summary_node(state: GraphState, llm) -> dict:
     """
     The Analyst - Creates a bridging narrative between candidate and role.
     
@@ -227,7 +225,7 @@ def generate_summary_node(state: GraphState, llm) -> GraphState:
 
 
 # WRITE COVER LETTER (The Copywriter)
-def write_cover_letter_node(state: GraphState, llm) -> GraphState:
+def write_cover_letter_node(state: GraphState, llm) -> dict:
     """
     The Copywriter - Drafts the initial cover letter.
     
@@ -272,7 +270,7 @@ def write_cover_letter_node(state: GraphState, llm) -> GraphState:
 
 
 # CRITIQUE LETTER (The Hiring Manager)
-def critique_letter_node(state: GraphState, llm) -> GraphState:
+def critique_letter_node(state: GraphState, llm) -> dict:
     """
     The Hiring Manager - Reviews letter for quality and authenticity.
     
@@ -323,7 +321,7 @@ def critique_letter_node(state: GraphState, llm) -> GraphState:
 
 # REFINE LETTER (The Editor)
 
-def refine_letter_node(state: GraphState, llm) -> GraphState:
+def refine_letter_node(state: GraphState, llm) -> dict:
     """
     The Editor - Rewrites letter based on critique feedback.
     
