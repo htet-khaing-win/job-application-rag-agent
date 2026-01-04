@@ -8,6 +8,7 @@ import pdfplumber
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import time
 from privacy import PIIGuard
+import sys
 
 load_dotenv()
 pii_guard = PIIGuard()
@@ -271,3 +272,12 @@ def retrieve_resumes_node(state: GraphState, llm) -> GraphState:
         "relevance_score": max_score,
         "rewrite_count": rewrite_count
     }
+
+if __name__ == "__main__":
+    # Check if a file path was actually provided in the terminal
+    if len(sys.argv) > 1:
+        resume_path = sys.argv[1]
+        print(f"Starting ingestion for: {resume_path}")
+        ingest_resume_to_pinecone(resume_path)
+    else:
+        print("Error: Please provide a file path // python database.py resume.pdf")
