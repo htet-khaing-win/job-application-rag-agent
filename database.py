@@ -7,8 +7,10 @@ from docx import Document
 import pdfplumber
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import time
+from privacy import PIIGuard
 
 load_dotenv()
+pii_guard = PIIGuard()
 
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 
@@ -85,7 +87,7 @@ def ingest_resume_to_pinecone(file_path):
 
     Process Flow:
         1. Parse: Extract content based on file extension.
-        2. Clean: Normalize text for better embedding quality.
+        2. Clean: Anonymize and Normalize text for better embedding quality.
         3. Split: Segment text using RecursiveCharacterTextSplitter (500 chars, 80 overlap).
         4. Vectorize: Generate 768-dimension embeddings for each segment.
         5. Storage: Batch upload to Pinecone with source tracking.
@@ -110,8 +112,11 @@ def ingest_resume_to_pinecone(file_path):
     else: 
         with open(file_path, "r", encoding="utf-8") as f:
             text = f.read()
-
-    cleaned = clean_text(text)
+    
+    # React the sensitive infor before processing
+    safe_text = pii_guard.redact_text(text)
+    cleaned = clean_text(safe_text)
+    
     
     # Chunking
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
