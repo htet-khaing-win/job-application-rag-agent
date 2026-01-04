@@ -265,7 +265,6 @@ def retrieve_resumes_node(state: GraphState, llm) -> dict:
 
     rewrite_count = state.rewrite_count + 1 if state.needs_rewrite else state.rewrite_count
     return {
-        **state, 
         "retrieved_chunks": retrieved_chunks, 
         "relevance_score": max_score,
         "rewrite_count": rewrite_count
