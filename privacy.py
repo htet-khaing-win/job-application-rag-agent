@@ -38,18 +38,29 @@ class PIIGuard:
             score = 0.8
         )
 
+        cert_pattern = Pattern(
+            name = "Cert_pattern",
+            regex=r"(?:https?:\/\/)?(?:www\.)?(?:credly\.com|coursera\.org\/verify|badges\.alignment\.org)\/\S+", 
+            score=0.8
+        )
+
         self.analyzer.registry.add_recognizer(PatternRecognizer
                                               (supported_entity="LINKEDIN", 
                                                patterns=[linkedin_pattern]))
+        
         self.analyzer.registry.add_recognizer(PatternRecognizer
                                               (supported_entity="GITHUB", 
                                                patterns=[github_pattern]))
+        
+        self.analyzer.registry.add_recognizer(PatternRecognizer
+                                              (supported_entity="CERTIFICATE", 
+                                               patterns=[cert_pattern]))
 
 
     def redact_text(self, text: str) -> str:
 
         # Populate target fields to mask
-        entities = ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "LOCATION", "LINKEDIN", "GITHUB"]
+        entities = ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "LOCATION", "LINKEDIN", "GITHUB", "CERTIFICATE"]
 
         # Analyze for PII content
         results = self.analyzer.analyze(
@@ -68,5 +79,6 @@ class PIIGuard:
                 "LOCATION": OperatorConfig("replace", {"new_value": "[LOCATION]"}),
                 "LINKEDIN": OperatorConfig("replace", {"new_value": "[LINKEDIN_URL]"}),
                 "GITHUB": OperatorConfig("replace", {"new_value": "[GITHUB_URL]"}),
+                "CERTIFICATE": OperatorConfig("replace", {"new_value": "[CERTIFICATE_URL]"}),
             }
         ).text
