@@ -16,59 +16,85 @@ llm = ChatGoogleGenerativeAI(
 
 def main():
     """
-    Entry point for the Job Application Assistant Agent.
+    Orchestrator for the Job Application Assistant.
     
-    Workflow:
-    1. Takes a job description as input
-    2. Retrieves relevant resume chunks from Pinecone
-    3. Generates tailored cover letter with iterative refinement
-    4. Outputs polished, ATS-optimized application materials
+    This entry point manages:
+    1. Robust Multi-line Input: Uses a 'DONE' sentinel to allow users to 
+       paste complex JDs with empty lines without prematurely triggering the graph.
+    2. State Initialization: Prepares a clean dictionary-based initial state 
+       to comply with LangGraph's mapping requirements.
+    3. Fallback Handling: Gracefully presents fallback suggestions if the 
+       JD is invalid or no resume matches are found.
+    4. Output Formatting: Displays the final cover letter, relevance scores, 
+       and iteration metrics.
     """
 
-    app = build_graph(llm)
+    print("--- Job Application Assistant ---")
+    print("Paste your Job Description below.")
+    print("When finished, type 'DONE' on a new line and press Enter.")
+    print("---------------------------------")
+
+    # Multi-line input collection
     lines = []
     while True:
-        line = input()
-        if line == "":
+        try:
+            line = input()
+            # If the user types 'DONE', stop collecting
+            if line.strip().upper() == "DONE":
+                break
+            lines.append(line)
+        except EOFError:
             break
-        lines.append(line)
-
+    
     job_description = "\n".join(lines)
 
     if not job_description.strip():
         print("You'll need to parse job description first")
         return
     
+    app = build_graph(llm)
+    
     # Initialize state
     initial_state = {
         "job_description" : job_description,
+        "is_valid_jd": False,
         "cleaned_jd" : "",
         "retrieved_chunks" : [],
         "candidate_summary" : "",
         "resume_summary" : "",
+        "cover_letter" : "",
+        "critique_feedback" : "",
         "relevance_score" : 0,
         "needs_rewrite" : False,
         "grading_feedback" : "",
-        "cover_letter" : "",
-        "critique_feedback" : "",
         "needs_refinement" : False,
-        "refinement_count" : 0
+        "refinement_count" : 0,
+        "error_type": "",
+        "error_message": "",
+        "is_fallback": False,
+        "final_response": "",
+        "rewrite_count": 0
     }   
 
     try:
         result = app.invoke(initial_state)
+
+        # Check if fallback was triggered
+        if result.get("is_fallback", False):
+            print("FALLBACK RESPONSE: ")
+            print(result.get("final_response", "An error occurred."))
+            return
+        
         print("Your Cover Letter is Ready")
+        print("---------------------------------")
         print(result["cover_letter"])
+        print("---------------------------------")
         print(f" Retrieval Score: {result['relevance_score']}/100")
         print(f" Refinement Iterations: {result['refinement_count']}")
 
 
     except Exception as e:
         print(f" Error during processing: {str(e)}")
-        print("\n Debug Info:")
-        print(f"- Check your API keys in .env file")
-        print(f"- Verify Pinecone index 'resume-index' exists")
-        print(f"- Ensure resume data is uploaded to Pinecone")
 
 if __name__ == "__main__":
     main()
