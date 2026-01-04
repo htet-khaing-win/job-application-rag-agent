@@ -5,7 +5,7 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from state import GraphState
 from docx import Document
 import pdfplumber
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 import time
 from privacy import PIIGuard
 import sys
@@ -190,7 +190,7 @@ def validate_resume_file(file_path):
     return True, "Completed"
 
 
-def retrieve_resumes_node(state: GraphState, llm) -> GraphState:
+def retrieve_resumes_node(state: GraphState, llm) -> dict:
     """
     The Researcher - Queries Pinecone vector database for relevant resume chunks.
     
@@ -210,7 +210,6 @@ def retrieve_resumes_node(state: GraphState, llm) -> GraphState:
     if not resume_list:
         print(" No resumes found in database.")
         return {
-            **state, 
             "retrieved_chunks": [], 
             "error_type": "no_resumes",
             "grading_feedback": "Database is empty. Please upload resumes first."
@@ -234,7 +233,7 @@ def retrieve_resumes_node(state: GraphState, llm) -> GraphState:
     valid_matches = [m for m in all_matches if m['score'] >= RELEVANCE_THRESHOLD]
 
     if not valid_matches:
-        return {**state, 
+        return {
                 "retrieved_chunks": [], 
                 "relevance_score": 0, 
                 "grading_feedback": "No relevant matches."}
@@ -246,7 +245,6 @@ def retrieve_resumes_node(state: GraphState, llm) -> GraphState:
     if not final_matches:
         print(" No matches passed the relevance threshold.")
         return {
-            **state, 
             "retrieved_chunks": [], 
             "grading_feedback": "Mismatch: No resumes are sufficiently relevant to this JD.",
             "relevance_score": 0 # Fallback Signal
