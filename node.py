@@ -153,7 +153,12 @@ def grade_retrieval_node(state: GraphState, llm) -> dict:
         # Direct JSON load
         data = json.loads(content)
         score = int(data.get("score", 0))
-        needs_rewrite = data.get("needs_rewrite", False)
+
+        # If the key is missing, determine based on score
+        if "needs_rewrite" in data:
+            needs_rewrite = data["needs_rewrite"]
+        else:
+            needs_rewrite = score < 70
         reasoning = data.get("reasoning", "No reasoning provided.")
         
     except json.JSONDecodeError:
