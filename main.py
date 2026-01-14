@@ -1,17 +1,33 @@
-from langchain_google_genai import ChatGoogleGenerativeAI
+# from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
 import os
 from dotenv import load_dotenv
 from graph import build_graph
 
 load_dotenv()
 
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
-    temperature=0.0, 
-    max_tokens=None,
-    timeout=None,
-    max_retries=2,
-    api_key = os.getenv("API_KEY")
+# llm = ChatGoogleGenerativeAI(
+#     model="gemini-2.5-flash",
+#     temperature=0.0, 
+#     max_tokens=None,
+#     timeout=None,
+#     max_retries=2,
+#     api_key = os.getenv("API_KEY")
+# )
+
+generator_llm = ChatOllama(
+    model="mistral:7b-instruct",
+    temperature=0.7, # To be creative
+    num_ctx=8192,
+    num_gpu=1
+)
+
+# Critic: Optimized for structural analysis and fault-finding
+critic_llm = ChatOllama(
+    model="qwen2.5:7b",
+    temperature=0.0,      
+    num_ctx=4096, # For latnecy Tradeoff
+    num_gpu=1
 )
 
 def main():
@@ -52,7 +68,7 @@ def main():
         print("You'll need to parse job description first")
         return
     
-    app = build_graph(llm)
+    app = build_graph(generator_llm, critic_llm)
     
     # Initialize state
     initial_state = {
