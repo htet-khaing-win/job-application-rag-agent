@@ -41,21 +41,27 @@ def should_proceed_with_retrieval(state: GraphState) -> str:
     return "retrieve_resumes"
 
 
-def build_graph(llm):
-    """Constructs the LangGraph workflow for job application assistance."""
+def build_graph(generator_llm, critic_llm):
+    """
+    Constructs the LangGraph workflow for job application assistance.
+    
+    Design principle:
+    - Generator (Mistral): Optimized for constrained, fluent generation
+    - Critic (Qwen): Optimized for analytical fault-finding
+    """
 
     workflow = StateGraph(GraphState)
 
     # Nodes
-    workflow.add_node("ingest_jd", partial(ingest_jd_node, llm=llm))
-    workflow.add_node("fallback_handler", partial(fallback_handler_node, llm=llm))
-    workflow.add_node("rewrite_query", partial(rewrite_query_node, llm=llm))
-    workflow.add_node("retrieve_resumes", partial(retrieve_resumes_node, llm=llm))
-    workflow.add_node("grade_retrieval", partial(grade_retrieval_node, llm=llm))
-    workflow.add_node("generate_summary", partial(generate_summary_node, llm=llm))
-    workflow.add_node("write_cover_letter", partial(write_cover_letter_node, llm=llm))
-    workflow.add_node("critique_letter", partial(critique_letter_node, llm=llm))
-    workflow.add_node("refine_letter", partial(refine_letter_node, llm=llm))
+    workflow.add_node("ingest_jd", partial(ingest_jd_node, llm=critic_llm))
+    workflow.add_node("fallback_handler", partial(fallback_handler_node, llm=critic_llm))
+    workflow.add_node("rewrite_query", partial(rewrite_query_node, llm=generator_llm))
+    workflow.add_node("retrieve_resumes", partial(retrieve_resumes_node, llm=critic_llm))
+    workflow.add_node("grade_retrieval", partial(grade_retrieval_node, llm=critic_llm))
+    workflow.add_node("generate_summary", partial(generate_summary_node, llm=generator_llm))
+    workflow.add_node("write_cover_letter", partial(write_cover_letter_node, llm=generator_llm))
+    workflow.add_node("critique_letter", partial(critique_letter_node, llm=critic_llm))
+    workflow.add_node("refine_letter", partial(refine_letter_node, llm=generator_llm))
 
     # Edges
     workflow.add_edge(START, "ingest_jd")
