@@ -6,6 +6,7 @@ from state import GraphState
 from docx import Document
 import pdfplumber
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_experimental.text_splitter import SemanticChunker
 import time
 from privacy import PIIGuard
 import sys
@@ -89,7 +90,7 @@ def ingest_resume_to_pinecone(file_path):
     Process Flow:
         1. Parse: Extract content based on file extension.
         2. Clean: Anonymize and Normalize text for better embedding quality.
-        3. Split: Segment text using RecursiveCharacterTextSplitter (500 chars, 80 overlap).
+        3. Split: Segment text using SemanticChunker.
         4. Vectorize: Generate 768-dimension embeddings for each segment.
         5. Storage: Batch upload to Pinecone with source tracking.
 
@@ -120,7 +121,7 @@ def ingest_resume_to_pinecone(file_path):
     
     
     # Chunking
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    splitter = SemanticChunker(embeddings, breakpoint_threshold_type="percentile")
     chunks = splitter.split_text(cleaned)
     
     # Cascading Delete (Deleting Chunks if the upload file has the same name)
