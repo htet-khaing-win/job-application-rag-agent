@@ -1,7 +1,7 @@
 from state import GraphState
 from functools import partial
 from langgraph.graph import StateGraph, END, START
-from node import ingest_jd_node, grade_retrieval_node, generate_summary_node, write_cover_letter_node, critique_letter_node, refine_letter_node, fallback_handler_node, rewrite_query_node
+from node import ingest_jd_node, grade_retrieval_node, generate_summary_node, write_cover_letter_node, critique_letter_node, refine_letter_node, fallback_handler_node, rewrite_query_node, verify_claims_node, research_company_node
 from database import retrieve_resumes_node
 from IPython.display import display, Image
 
@@ -10,15 +10,20 @@ def should_rewrite_query(state: GraphState) -> str:
     If the retrieval quality is poor, route to rewrite_query, else continue.
     """
     MAX_REWRITES = 2
+    ACCEPTABLE_THRESHOLD = 60
+    current_score = state.relevance_score
+    current_rewrites = state.rewrite_count
+
     # If quality is acceptable, proceed
-    if not state.needs_rewrite:
+    if current_score  >= ACCEPTABLE_THRESHOLD:
         return "generate_summary"
     
     # If exhausted rewrites, trigger fallback
-    if state.rewrite_count >= MAX_REWRITES:
+    if current_rewrites >= MAX_REWRITES:
         return "fallback_handler"
     
     # Otherwise, retry retrieval with adjusted query
+    print(f"Score below threshold. Rewriting query (attempt {current_rewrites + 1}/{MAX_REWRITES})")
     return "rewrite_query"
 
 def should_refine_letter(state: GraphState) -> str:
@@ -40,6 +45,22 @@ def should_proceed_with_retrieval(state: GraphState) -> str:
         return "fallback_handler"
     return "retrieve_resumes"
 
+def needs_company_research(state: GraphState) -> str:
+    """
+    NEW: Routes to company research if name is confirmed.
+    """
+    if state.company_name and state.company_name != "UNKNOWN":
+        print(f" Researching: {state.company_name}")
+        return "research_company"
+    
+    print("  No company name provided. Skipping research.")
+    return "retrieve_resumes"
+
+def verification_guard(state: GraphState) -> str:
+    if state.error_type == "verification_failed":
+        return "fallback_handler"
+    return "write_cover_letter"
+
 
 def build_graph(generator_llm, critic_llm):
     """
@@ -54,38 +75,66 @@ def build_graph(generator_llm, critic_llm):
 
     # Nodes
     workflow.add_node("ingest_jd", partial(ingest_jd_node, llm=critic_llm))
-    workflow.add_node("fallback_handler", partial(fallback_handler_node, llm=critic_llm))
-    workflow.add_node("rewrite_query", partial(rewrite_query_node, llm=generator_llm))
+    # workflow.add_node("extract_company", partial(extract_company_name_node, llm=critic_llm))  
+    workflow.add_node("research_company", partial(research_company_node, llm=critic_llm))  
     workflow.add_node("retrieve_resumes", partial(retrieve_resumes_node, llm=critic_llm))
     workflow.add_node("grade_retrieval", partial(grade_retrieval_node, llm=critic_llm))
+    workflow.add_node("rewrite_query", partial(rewrite_query_node, llm=generator_llm))
+    workflow.add_node("verify_claims", partial(verify_claims_node, llm=critic_llm))  
     workflow.add_node("generate_summary", partial(generate_summary_node, llm=generator_llm))
     workflow.add_node("write_cover_letter", partial(write_cover_letter_node, llm=generator_llm))
     workflow.add_node("critique_letter", partial(critique_letter_node, llm=critic_llm))
     workflow.add_node("refine_letter", partial(refine_letter_node, llm=generator_llm))
+    workflow.add_node("fallback_handler", partial(fallback_handler_node, llm=critic_llm))
 
     # Edges
     workflow.add_edge(START, "ingest_jd")
-    workflow.add_conditional_edges(
-        "ingest_jd",
-        should_proceed_with_retrieval,
-        {
-            "retrieve_resumes": "retrieve_resumes",
-            "fallback_handler": "fallback_handler"
-        }
-    )
+    workflow.add_edge("ingest_jd", "research_company")
+    # workflow.add_conditional_edges(
+    #     "ingest_jd",
+    #     should_proceed_with_retrieval,
+    #     {
+    #         "extract_company": "extract_company",
+    #         "fallback_handler": "fallback_handler"
+    #     }
+    # )
+
+    # workflow.add_conditional_edges(
+    #     "extract_company",
+    #     needs_company_research,
+    #     {
+    #         "research_company": "research_company",
+    #         "retrieve_resumes": "retrieve_resumes"
+    #     }
+    # )
+
+    workflow.add_edge("research_company", "retrieve_resumes")
     workflow.add_edge("retrieve_resumes", "grade_retrieval")
+
     workflow.add_conditional_edges(
         "grade_retrieval",
         should_rewrite_query,
         {
-            "rewrite_query": "rewrite_query",  
             "generate_summary": "generate_summary",
+            "rewrite_query": "rewrite_query",  
             "fallback_handler": "fallback_handler"
         }
     )
-    workflow.add_edge("generate_summary", "write_cover_letter")
+    workflow.add_edge("rewrite_query", "retrieve_resumes")
+    workflow.add_edge("generate_summary", "verify_claims")
+
+    workflow.add_conditional_edges(
+    "verify_claims",
+    verification_guard,
+    {
+        "write_cover_letter": "write_cover_letter",
+        "fallback_handler": "fallback_handler"
+    }
+)
+
     workflow.add_edge("write_cover_letter", "critique_letter")
     workflow.add_edge("refine_letter", "critique_letter")
+
     workflow.add_conditional_edges(
         "critique_letter",
         should_refine_letter,
