@@ -20,3 +20,9 @@ class GraphState(BaseModel):
     is_fallback: bool = False       
     final_response: str = "" 
     rewrite_count: int = 0  # Tracks the times Agent re-query Pinecone due to jd and resume mismatch
+    # suggested_company_name: str = ""
+    company_name: str = ""
+    company_research: str = ""
+    # needs_company_confirmation: bool = False
+    company_research_success: bool = False
+    verification_log: str = ""

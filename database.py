@@ -1,7 +1,8 @@
 import os
 from dotenv import load_dotenv
 from pinecone import Pinecone, ServerlessSpec
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+# from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_ollama import OllamaEmbeddings
 from state import GraphState
 from docx import Document
 import pdfplumber
@@ -53,11 +54,14 @@ def get_index(index_name: str, dimension: int = 768):
 
 index = get_index(index_name="resume-index", dimension=768)
 
-embeddings = GoogleGenerativeAIEmbeddings(
-    model="models/text-embedding-004",
-    google_api_key=os.getenv("API_KEY") 
-)
+# embeddings = GoogleGenerativeAIEmbeddings(
+#     model="models/text-embedding-004",
+#     google_api_key=os.getenv("API_KEY") 
+# )
 
+embeddings = OllamaEmbeddings(
+    model="nomic-embed-text" 
+)
 
 # Helpers
 def parse_pdf(file_path):
@@ -264,11 +268,9 @@ def retrieve_resumes_node(state: GraphState, llm) -> dict:
     max_score = round(final_matches[0]['score'] * 100, 2)
     print(f" Retrieved {len(retrieved_chunks)} relevant chunks. Top Match Score: {max_score}%.")
 
-    rewrite_count = state.rewrite_count + 1 if state.needs_rewrite else state.rewrite_count
     return {
         "retrieved_chunks": retrieved_chunks, 
         "relevance_score": max_score,
-        "rewrite_count": rewrite_count
     }
 
 if __name__ == "__main__":

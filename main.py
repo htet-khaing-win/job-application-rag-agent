@@ -18,8 +18,8 @@ load_dotenv()
 generator_llm = ChatOllama(
     model="mistral:7b-instruct",
     temperature=0.7, # To be creative
-    num_ctx=8192,
-    num_gpu=1
+    num_ctx=4096,
+    num_gpu=35,
 )
 
 # Critic: Optimized for structural analysis and fault-finding
@@ -27,7 +27,7 @@ critic_llm = ChatOllama(
     model="qwen2.5:7b",
     temperature=0.0,      
     num_ctx=4096, # For latnecy Tradeoff
-    num_gpu=1
+    num_gpu=35,
 )
 
 def main():
@@ -89,13 +89,30 @@ def main():
         "error_message": "",
         "is_fallback": False,
         "final_response": "",
-        "rewrite_count": 0
+        "rewrite_count": 0,
+        # "suggested_company_name": "",
+        "company_name": "",
+        "company_research": "",
+        "needs_company_confirmation": False,
+        "company_research_success": False
     }   
 
     try:
+        print("\n Analyzing job description...")
         result = app.invoke(initial_state)
+        
+        company_input = input("Please enter the company name: ").strip()
+        result["company_name"] = company_input
+            
+        print(f" Company set to: {result['company_name']}")
+        result["needs_company_confirmation"] = False
+        
+        # Continue workflow with confirmed company name
+        print(" Researching company information...")
+        result = app.invoke(result)
 
-        # Check if fallback was triggered
+
+            # Check if fallback was triggered
         if result.get("is_fallback", False):
             print("FALLBACK RESPONSE: ")
             print(result.get("final_response", "An error occurred."))
