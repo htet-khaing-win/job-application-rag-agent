@@ -17,7 +17,15 @@ load_dotenv()
 pii_guard = PIIGuard()
 
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-bm25 = BM25Encoder.default()  # default for English
+BM25_PATH = "utilities/fitted_bm25.json"
+
+if os.path.exists(BM25_PATH):
+    print(f" Loading custom fitted BM25 from {BM25_PATH}")
+    bm25 = BM25Encoder()
+    bm25.load(BM25_PATH)
+else:
+    print(" WARNING: No fitted BM25 found. Using default (cold) encoder.")
+    bm25 = BM25Encoder.default()
 
 def get_index(index_name: str, dimension: int = 768):
     """
