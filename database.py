@@ -11,12 +11,13 @@ from langchain_experimental.text_splitter import SemanticChunker
 import time
 from privacy import PIIGuard
 import sys
+from pinecone_text.sparse import BM25Encoder
 
 load_dotenv()
 pii_guard = PIIGuard()
 
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-
+bm25 = BM25Encoder.default()  # default for English
 
 def get_index(index_name: str, dimension: int = 768):
     """
@@ -34,7 +35,7 @@ def get_index(index_name: str, dimension: int = 768):
         pc.create_index(
             name = index_name,
             dimension = dimension,
-            metric = "cosine",
+            metric = "dotproduct", # for hybrid search
             spec = ServerlessSpec(
                 cloud="aws", 
                 region="us-east-1"
@@ -119,7 +120,7 @@ def ingest_resume_to_pinecone(file_path):
         with open(file_path, "r", encoding="utf-8") as f:
             text = f.read()
     
-    # React the sensitive infor before processing
+    # Redact the sensitive infor before processing
     safe_text = pii_guard.redact_text(text)
     cleaned = clean_text(safe_text)
     
@@ -127,6 +128,13 @@ def ingest_resume_to_pinecone(file_path):
     # Chunking
     splitter = SemanticChunker(embeddings, breakpoint_threshold_type="percentile")
     chunks = splitter.split_text(cleaned)
+
+    # generate vectors (dense+sparse)
+    dense_vectors = embeddings.embed_documents(chunks)
+
+    # bm25.fit(chunks)
+    # generate the keyword weight for every chunk
+    sparse_vectors = bm25.encode_documents(chunks)
     
     # Cascading Delete (Deleting Chunks if the upload file has the same name)
     print(f" Checking for existing records of {filename}...")
@@ -137,12 +145,12 @@ def ingest_resume_to_pinecone(file_path):
 
     # Embedding & Upserting
     vectors = []
-    embedded_chunks = embeddings.embed_documents(chunks)
 
-    for i, (chunk, vector_val) in enumerate(zip(chunks, embedded_chunks)):
+    for i, (chunk, dense, sparse) in enumerate(zip(chunks, dense_vectors, sparse_vectors)):
         vectors.append({
             "id": f"{filename}#{i}", # "#" symbol is there for ID to be more deterministic
-            "values": vector_val,
+            "values": dense,
+            "sparse_values": sparse,
             "metadata": {
                 "text": chunk, 
                 "source": filename,
@@ -208,7 +216,8 @@ def retrieve_resumes_node(state: GraphState, llm) -> dict:
     Output: state.retrieved_chunks - List of resume text chunks with scores
     
     """
-    query_vector = embeddings.embed_query(state.cleaned_jd)
+    dense_query = embeddings.embed_query(state.cleaned_jd)
+    sparse_query = bm25.encode_queries(state.cleaned_jd)
     all_matches = []
     resume_list = list_stored_resumes()
 
@@ -224,34 +233,34 @@ def retrieve_resumes_node(state: GraphState, llm) -> dict:
     for names in resume_list:
         try:
             resume = index.query(
-                vector = query_vector,
-                top_k = 10,
-                include_metadata = True,
+                vector=dense_query,
+                sparse_vector=sparse_query, 
+                top_k=10,
+                include_metadata=True,
+                alpha=0.4,
                 namespace = names
             )
             all_matches.extend(resume['matches'])
         except Exception as e:
             print(f"Error querying namespace {names}: {str(e)}")
 
-    # Sort  top 5 based on score
-    RELEVANCE_THRESHOLD = 0.65
-    valid_matches = [m for m in all_matches if m['score'] >= RELEVANCE_THRESHOLD]
+    # valid_matches = [m for m in all_matches if m['score'] >= 0.65]
 
-    if not valid_matches:
+    if not all_matches:
         return {
                 "retrieved_chunks": [], 
                 "relevance_score": 0, 
                 "grading_feedback": "No relevant matches."}
 
     # Aggregation per Resume (Diversity)
-    sorted_matches = sorted(valid_matches, key=lambda x: x['score'], reverse=True)
+    sorted_matches = sorted(all_matches, key=lambda x: x['score'], reverse=True)
     final_matches = sorted_matches[:5]
 
     if not final_matches:
         print(" No matches passed the relevance threshold.")
         return {
             "retrieved_chunks": [], 
-            "grading_feedback": "Mismatch: No resumes are sufficiently relevant to this JD.",
+            "grading_feedback": "Mismatch: No resumes are sufficiently relevant to this Job Description.",
             "relevance_score": 0 # Fallback Signal
         }
 
