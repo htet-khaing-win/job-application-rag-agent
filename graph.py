@@ -57,7 +57,7 @@ def needs_company_research(state: GraphState) -> str:
     return "retrieve_resumes"
 
 def verification_guard(state: GraphState) -> str:
-    if state.error_type == "verification_failed":
+    if state.error_type in ["verification_failed", "hallucination_critical"]:
         return "fallback_handler"
     return "write_cover_letter"
 
