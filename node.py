@@ -35,25 +35,14 @@ def ingest_jd_node(state: GraphState, llm) -> dict:
             "error_message": "This request doesn't appears to be a job description. Please paste a complete job posting."
         }
     
-    cleaning_prompt = f"""
-    ROLE: You are an expert HR Document Analyst with 10+ years of experience parsing job descriptions.
-    
-    TASK: Clean and extract the essential components from this Job Description.
-    
-    INPUT - Job Description: {state.job_description}
-    
-    INSTRUCTIONS:
-    1. Remove generic HR language ("competitive salary", "great culture", etc.)
-    2. Extract MUST-HAVE technical skills and qualifications
-    3. Identify key responsibilities and measurable outcomes
-    4. List industry-specific keywords for ATS optimization
-    5. Organize output into clear sections
-    
-    OUTPUT FORMAT:
-    Core Requirements: [List of must-have skills and qualifications]
-    Key Responsibilities: [Primary job duties]
-    Target Keywords: [Comma-separated list of critical terms for matching]
-    """
+    cleaning_prompt = f"""Extract from this job description:
+    - Core Requirements: must-have skills/qualifications
+    - Key Responsibilities: primary duties
+    - Target Keywords: critical ATS terms (comma-separated)
+
+    Remove generic HR fluff. Focus on technical requirements and measurable outcomes.
+
+    {state.job_description}"""
     
     response = llm.invoke(cleaning_prompt)
     return {
@@ -92,25 +81,12 @@ def research_company_node(state: GraphState, llm) -> dict:
             research_text += f"{result.get('content', '')}\n\n"
         
         # Use LLM to synthesize research into usable summary
-        synthesis_prompt = f"""
-    ROLE: You are a Company Research Analyst.
+        synthesis_prompt = f"""Synthesize into 100-150 words:
+        - Company Overview: 2-3 mission/values
+        - Recent Developments: 1-2 items from past 6mo
+        - Culture Insights: unique aspects
 
-    TASK: Synthesize this raw company research into actionable insights for a cover letter.
-
-    RAW RESEARCH DATA:
-    {research_text}
-
-    INSTRUCTIONS:
-    1. Extract 2-3 key company values or mission statements
-    2. Identify 1-2 recent achievements, initiatives, or news items
-    3. Note any unique company culture aspects
-    4. Keep output concise (100-150 words)
-
-    OUTPUT FORMAT:
-    Company Overview: [2-3 sentences on mission/values]
-    Recent Developments: [1-2 notable items from past 6 months]
-    Culture Insights: [Any relevant workplace culture notes]
-    """
+        {research_text}"""
         
         synthesis_response = llm.invoke(synthesis_prompt)
         
@@ -150,40 +126,27 @@ def verify_claims_node(state: GraphState, llm) -> dict:
         chunk["text"] for chunk in state.retrieved_chunks
     ])
     
-    verification_prompt = f"""
-    ROLE: You are a Fact-Checker for resume verification.
+    verification_prompt = f"""Validate EVERY claim in Candidate Summary against Source Resume Data.
 
-    TASK: Validate that EVERY claim in the Candidate Summary is directly supported by the Source Resume Data.
+    RULES:
+    - No inference (e.g., "used Python" is not equate to "expert Python")
+    - No unstated qualifications or experience
+    - No technology extrapolation
+    - Cite specific projects as evidence 
 
-    SOURCE RESUME DATA (Ground Truth):
-    {source_text}
+    SOURCE RESUME DATA: {source_text}
 
-    CANDIDATE SUMMARY TO VERIFY:
-    {state.candidate_summary}
+    CANDIDATE SUMMARY: {state.candidate_summary}
 
-    INSTRUCTIONS:
-    1. Extract each specific claim about skills, experience, and achievements
-    2. When mentioning skills, experience, cite specific projects from the resume that demonstrate those skills (e.g., 'demonstrated expertise in [Project Name]').
-    3. Mark claims as VERIFIED or UNSUPPORTED
-    4. If a claim cannot be directly traced to source data, it must be removed
-
-    STRICT RULES:
-    - Do NOT infer skills (e.g., if resume says "used Python", don't claim "expert in Python")
-    - Do NOT add qualifications not explicitly stated
-    - Do NOT assume years of experience beyond what's documented
-    - Do NOT extrapolate technologies (e.g., if they used x, don't claim y unless stated)
-
-    OUTPUT FORMAT:
+    OUTPUT:
     Verified Claims:
-    - [Claim 1]: [Supporting quote from source]
-    - [Claim 2]: [Supporting quote from source]
+    - [Claim]: [Source quote]
 
-    Removed Claims (Unsupported):
-    - [Claim X]: [Reason for removal]
+    Removed Claims:
+    - [Claim]: [Reason]
 
     Final Verified Summary:
-    [Rewrite the candidate summary using ONLY verified claims]
-    """
+    [Rewrite using ONLY verified claims]"""
     
     response = llm.invoke(verification_prompt)
     
@@ -276,38 +239,21 @@ def grade_retrieval_node(state: GraphState, llm) -> dict:
     FIXED: Now only generates a 0-100 score. Routing decision is made purely in Python.
     """
     
-    prompt = f"""
-    ROLE: You are a Technical Recruiter with expertise in candidate-role matching.
+    prompt = f"""Score resume-to-job match (0-100):
+    - 90-100: Exceptional, all key requirements met
+    - 70-89: Good, most requirements met
+    - 50-69: Moderate, some gaps
+    - 30-49: Weak, significant gaps
+    - 0-29: Poor match
 
-    TASK: Score the relevance of retrieved resume content against job requirements.
+    Focus on what IS present, not missing.
 
-    JOB REQUIREMENTS:
-    {state.cleaned_jd}
+    JOB REQUIREMENTS: {state.cleaned_jd}
 
-    RETRIEVED RESUME CHUNKS:
-    {state.retrieved_chunks}
+    RESUME CHUNKS: {state.retrieved_chunks}
 
-    INSTRUCTIONS:
-    1. Evaluate how well the resume chunks collectively match the job requirements
-    2. Assign a score from 0-100 where:
-    - 90-100: Exceptional match, all key requirements covered with strong evidence
-    - 70-89: Good match, most requirements covered
-    - 50-69: Moderate match, some requirements met but gaps exist
-    - 30-49: Weak match, significant gaps in qualifications
-    - 0-29: Poor match, candidate lacks most requirements
-
-    3. Provide brief reasoning explaining the score
-
-    CRITICAL: Focus on what IS present in the resume data, not what's missing.
-
-    OUTPUT FORMAT (strict JSON):
-    {{
-        "score": <integer 0-100>,
-        "reasoning": "<2-3 sentence explanation>"
-    }}
-
-    Do not add markdown formatting, code blocks, or any other text outside the JSON object.
-    """
+    Return strict JSON only (no markdown):
+    {{"score": <int>, "reasoning": "<2-3 sentences>"}}"""
     
     response = llm.invoke(prompt)
     content = response.content.strip()
@@ -360,27 +306,17 @@ def generate_summary_node(state: GraphState, llm) -> dict:
     Output: 
         - state.candidate_summary - Structured match analysis
     """
-    prompt = f"""
-    ROLE: You are a Career Coach and Resume Writer with 10+ years of experience.
-    
-    TASK: Create a comprehensive candidate-job match analysis.
-    
-    INPUT - Job Requirements: {state.cleaned_jd}
-    
-    INPUT - Candidate Resume Data: {state.retrieved_chunks}
-    
-    INSTRUCTIONS:
-    1. Map candidate's top 5 achievements to specific job requirements
-    2. Highlight quantifiable results (metrics, percentages, revenue impact)
-    3. Identify unique value propositions (what sets candidate apart)
-    4. Note any skill gaps and how to address them
-    5. Write in third person, professional tone
-    
-    OUTPUT FORMAT:
-    Key Qualifications Match: Requirement and Candidate Evidence mapping
-    Standout Achievements: Top 3 accomplishments with metrics
-    Value Proposition: 2-3 sentences on unique fit
-    """
+    prompt = f"""Create candidate-job match analysis:
+    - Key Qualifications Match: map top 5 achievements to job requirements (with metrics)
+    - Standout Achievements: top 3 with quantifiable results
+    - Value Proposition: 2-3 sentences on unique fit, skill gaps
+
+    Third person, professional tone.
+
+    JOB REQUIREMENTS: {state.cleaned_jd}
+
+    RESUME DATA: {state.retrieved_chunks}"""
+
     response = llm.invoke(prompt)
     return {"candidate_summary": response.content}
 
@@ -396,56 +332,32 @@ def write_cover_letter_node(state: GraphState, llm) -> dict:
         f"- {chunk['text']}" for chunk in state.retrieved_chunks
     ])
     
-    prompt = f"""
-    ROLE: You are a Senior Career Consultant specializing in Tech industry applications.
+    prompt = f"""Write ATS-optimized cover letter (300-350 words):
 
-    TASK: Write a compelling, ATS-optimized cover letter.
+    CONSTRAINTS (STRICT):
+    - Use ONLY skills/experience from Verified Qualifications below
+    - No invention/assumption of qualifications
+    - If unmatched requirement: express willingness to learn OR skip
+    - Every metric must trace to Resume Evidence
+    - No forbidden phrases: "Source:", "Job Requirements:", "According to", parenthetical citations
 
-    VERIFIED CANDIDATE QUALIFICATIONS (Ground Truth - Use ONLY This):
-    {state.candidate_summary}
+    STRUCTURE:
+    1. Opening: reference {state.company_name if hasattr(state, 'company_name') else '[Company Name]'} using company research
+    2. Body 1: match 2-3 strengths to job requirements (with evidence)
+    3. Body 2: problem-solving fit with concrete examples
+    4. Closing: strong call-to-action
 
-    SOURCE RESUME EVIDENCE (Reference for Verification):
-    {source_evidence}
+    FORMAT: Active voice, 2-4 metrics, mirror 5-7 JD keywords, use [{state.company_name if hasattr(state, 'company_name') else 'Company Name'}] placeholder.
 
-    JOB REQUIREMENTS:
-    {state.cleaned_jd}
+    VERIFIED QUALIFICATIONS (Ground Truth): {state.candidate_summary}
 
-    COMPANY RESEARCH (if available):
-    {state.company_research if hasattr(state, 'company_research') else '[Research pending]'}
+    RESUME EVIDENCE: {source_evidence}
 
-    CRITICAL CONSTRAINTS:
-    1. You may ONLY reference skills, experience, and achievements explicitly stated in "Verified Candidate Qualifications"
-    2. Do NOT invent or assume any qualifications not present in the source data
-    3. If a job requirement cannot be matched to candidate qualifications, either:
-    a) Express enthusiasm to learn/develop that skill, OR
-    b) Skip mentioning it entirely
-    4. Every metric or achievement must have a direct quote source from resume evidence
+    JOB REQUIREMENTS: {state.cleaned_jd}
 
-    LETTER STRUCTURE:
-    1. Opening: Reference {state.company_name if hasattr(state, 'company_name') else '[Company Name]'} specifically using company research insights
-    2. Body Paragraph 1: Match top 2-3 candidate strengths to job requirements (with evidence)
-    3. Body Paragraph 2: Demonstrate problem-solving fit with concrete examples
-    4. Closing: Strong call-to-action referencing specific role title
+    COMPANY RESEARCH: {state.company_research if hasattr(state, 'company_research') else '[Research pending]'}
 
-    FORMATTING REQUIREMENTS:
-    - Use active voice and strong verbs (led, achieved, delivered)
-    - Include 2-4 specific metrics/achievements from verified data only
-    - Mirror 5-7 keywords from job description naturally
-    - Keep to 300-350 words (3-4 paragraphs)
-    - Use placeholders: [{state.company_name if hasattr(state, 'company_name') else 'Company Name'}]
-
-    VERIFICATION CHECK:
-    Before finalizing, ensure every claim can be traced back to "Source Resume Evidence". However, do not explicitly mention it in the coverletter.
-
-    FORBIDDEN PHRASES:
-    - "Source:"
-    - "Job Requirements:"
-    - "According to..."
-    - Any text in parentheses that references sources
-
-    OUTPUT FORMAT:
-    Return ONLY the cover letter body text. No preamble or commentary.
-    """
+    Return cover letter body only."""
     
     response = llm.invoke(prompt)
     return {"cover_letter": response.content}
@@ -468,29 +380,26 @@ def critique_letter_node(state: GraphState, llm) -> dict:
         - state.critique_feedback - Structured improvement suggestions
         - state.needs_refinement - Boolean flag for rewrite loop
     """
-    prompt = f"""
-    ROLE: You are a Hiring Manager reviewing a cover letter for authenticity and impact.
+    prompt = f"""Critique cover letter against job requirements:
+
+    CRITERIA:
+    - Specificity: concrete examples/metrics?
+    - Originality: avoid clichés ("passionate", "team player")?
+    - Relevance: addresses top 3 requirements?
+    - Tone: confident not arrogant?
+    - ATS: critical keywords natural?
+    - Hallucination: only verified resume claims?
+
+    COVER LETTER: {state.cover_letter}
+
+    JOB REQUIREMENTS: {state.cleaned_jd}
+
+    OUTPUT:
+    Strengths: 2-3 positives
+    Issues to Fix: numbered, with line references
+    Recommended Changes: specific rewrites
+    Ready to Submit?: YES/NO"""
     
-    TASK: Critique this cover letter against the job requirements.
-    
-    INPUT - Cover Letter: {state.cover_letter}
-    
-    INPUT - Job Requirements: {state.cleaned_jd}
-    
-    EVALUATION CRITERIA:
-    1. Specificity: Are claims backed by concrete examples/metrics?
-    2. Originality: Does it avoid clichés like "passionate," "team player"?
-    3. Relevance: Does it address the top 3 job requirements directly?
-    4. Tone: Is it confident but not arrogant?
-    5. ATS Optimization: Does it include critical keywords naturally?
-    6. Hallucination Prevention: Does the cover letter using the skills and qualifications as claims that are not part of the retrieved resume chunks? 
-    
-    OUTPUT FORMAT:
-    Strengths: 2-3 specific positives
-    Issues to Fix: Numbered list of concrete problems with line references
-    Recommended Changes: Specific rewrites or additions needed
-    Ready to Submit?: [YES/NO]
-    """
     response = llm.invoke(prompt)
     
     # Determine if refinement is needed
@@ -522,27 +431,17 @@ def refine_letter_node(state: GraphState, llm) -> dict:
     """
     current_count = state.refinement_count + 1
     
-    prompt = f"""
-    ROLE: You are a Professional Editor specializing in business correspondence.
-    
-    TASK: Revise this cover letter based on the provided critique.
-    
-    INPUT - Current Draft: {state.cover_letter}
-    
-    INPUT - Critique Feedback: {state.critique_feedback}
-    
-    INSTRUCTIONS:
-    1. Address EVERY issue listed in "Issues to Fix"
-    2. Implement "Recommended Changes" exactly as specified
-    3. Preserve the strengths identified in the critique
-    4. Maintain the original structure and word count
-    5. Ensure natural flow after edits
-    
-    REFINEMENT ITERATION: {current_count}/3
-    
-    OUTPUT FORMAT:
-    Return ONLY the revised cover letter text. No commentary.
-    """
+    prompt = f"""Revise cover letter (iteration {current_count}/3):
+    - Address EVERY "Issues to Fix"
+    - Implement "Recommended Changes" exactly
+    - Preserve strengths, structure, word count
+    - Ensure natural flow
+
+    CURRENT DRAFT: {state.cover_letter}
+
+    CRITIQUE: {state.critique_feedback}
+
+    Return revised letter only. No commentary."""
     response = llm.invoke(prompt)
     
     return {
@@ -552,14 +451,12 @@ def refine_letter_node(state: GraphState, llm) -> dict:
 
 def rewrite_query_node(state: GraphState, llm) -> dict:
     """Uses LLM to improve the search query based on critic feedback."""
-    prompt = f"""
-    The previous search for resumes failed. 
-    Original Query: {state.cleaned_jd}
-    Critic Feedback: {state.grading_feedback}
-    
-    Task: Rewrite the search query to be more effective at finding relevant resume chunks in a vector database.
-    Focus on technical keywords and core requirements that are direct match to the job description.
-    """
+    prompt = f"""Previous search failed. Rewrite query for better vector DB matching using technical keywords and core requirements.
+
+    ORIGINAL: {state.cleaned_jd}
+
+    FEEDBACK: {state.grading_feedback}"""
+
     response = llm.invoke(prompt)
     return {
         "cleaned_jd": response.content,
