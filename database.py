@@ -325,7 +325,8 @@ def retrieve_resumes_node(state: GraphState, llm) -> dict:
         return {
             "retrieved_chunks": [], 
             "error_type": "no_resumes",
-            "grading_feedback": "Database is empty. Please upload resumes first."
+            "grading_feedback": "Database is empty. Please upload resumes first.",
+            "vector_relevance_score": 0.0
         }
 
     # Cross-namespace search
@@ -348,19 +349,19 @@ def retrieve_resumes_node(state: GraphState, llm) -> dict:
     if not all_matches:
         return {
                 "retrieved_chunks": [], 
-                "relevance_score": 0, 
+                "vector_relevance_score": 0.0, 
                 "grading_feedback": "No relevant matches."}
 
     # Aggregation per Resume (Diversity)
     sorted_matches = sorted(all_matches, key=lambda x: x['score'], reverse=True)
-    final_matches = sorted_matches[:5]
+    final_matches = sorted_matches[:11]
 
     if not final_matches:
         print(" No matches passed the relevance threshold.")
         return {
             "retrieved_chunks": [], 
             "grading_feedback": "Mismatch: No resumes are sufficiently relevant to this Job Description.",
-            "relevance_score": 0 # Fallback Signal
+            "vector_relevance_score": 0.0 # Fallback Signal
         }
 
     retrieved_chunks = [
@@ -378,7 +379,7 @@ def retrieve_resumes_node(state: GraphState, llm) -> dict:
 
     return {
         "retrieved_chunks": retrieved_chunks, 
-        "relevance_score": vector_score,
+        "vector_relevance_score": vector_score,
     }
 
 if __name__ == "__main__":
