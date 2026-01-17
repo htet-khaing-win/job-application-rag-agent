@@ -1,4 +1,4 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 
 class GraphState(BaseModel):
@@ -10,7 +10,6 @@ class GraphState(BaseModel):
     resume_summary: str = ""
     cover_letter: str = ""
     critique_feedback: str = ""
-    relevance_score: float = 0
     needs_rewrite: bool = False
     grading_feedback: str = ""
     needs_refinement: bool = False
@@ -24,5 +23,8 @@ class GraphState(BaseModel):
     company_research: str = ""
     company_research_success: bool = False
     verification_log: str = ""
-    vector_relevance_score: float = 0.0   # Pinecone similarity (0–100)
+    vector_relevance_score: Optional[float] = None   # Pinecone similarity (0–100)
     llm_relevance_score: int = 0           # LLM judgment (0–100)
+    verified_skills: List[str] = Field(default_factory=list)  # Simple list for compatibility
+    unverified_skills: List[str] = Field(default_factory=list)
+    verified_skills_detailed: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict) 
