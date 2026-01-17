@@ -231,7 +231,6 @@ def ingest_resume_to_pinecone(file_path):
     # generate vectors (dense+sparse)
     dense_vectors = embeddings.embed_documents(texts)
 
-    # bm25.fit(chunks)
     # generate the keyword weight for every chunk
     sparse_vectors = bm25.encode_documents(texts)
     
@@ -374,12 +373,12 @@ def retrieve_resumes_node(state: GraphState, llm) -> dict:
         for m in final_matches 
     ]
 
-    max_score = round(final_matches[0]['score'] * 100, 2)
-    print(f" Retrieved {len(retrieved_chunks)} relevant chunks. Top Match Score: {max_score}%.")
+    vector_score = round(final_matches[0]['score'] * 100, 2)
+    print(f" Retrieved {len(retrieved_chunks)} relevant chunks. Top Match Score: {vector_score}%.")
 
     return {
         "retrieved_chunks": retrieved_chunks, 
-        "relevance_score": max_score,
+        "relevance_score": vector_score,
     }
 
 if __name__ == "__main__":
