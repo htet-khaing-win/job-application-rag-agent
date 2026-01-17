@@ -98,7 +98,8 @@ def main():
         "resume_summary" : "",
         "cover_letter" : "",
         "critique_feedback" : "",
-        "relevance_score" : 0,
+        "vector_relevance_score": 0.0,
+        "llm_relevance_score" : 0,
         "needs_rewrite" : False,
         "grading_feedback" : "",
         "needs_refinement" : False,
@@ -129,7 +130,7 @@ def main():
         print("--------------------------------- \n")
         print(result["cover_letter"])
         print("\n ---------------------------------")
-        print(f" Retrieval Score: {result['relevance_score']}/100")
+        print(f" Retrieval Score: {result['vector_relevance_score']}/100")
         print(f" Refinement Iterations: {result['refinement_count']}")
 
 
