@@ -1,4 +1,5 @@
 # from langchain_google_genai import ChatGoogleGenerativeAI
+# from langchain_openai import ChatOpenAI
 from langchain_ollama import ChatOllama
 import os
 from dotenv import load_dotenv
@@ -6,13 +7,26 @@ from graph import build_graph
 
 load_dotenv()
 
-# llm = ChatGoogleGenerativeAI(
+# generator_llm = ChatGoogleGenerativeAI(
 #     model="gemini-2.5-flash",
 #     temperature=0.0, 
 #     max_tokens=None,
 #     timeout=None,
 #     max_retries=2,
-#     api_key = os.getenv("API_KEY")
+#     api_key = os.getenv("GEMINI_API_KEY"),
+#     streaming=True,
+#     verbose=True
+# )
+
+# critic_llm = ChatOpenAI(
+#     model="gpt-4o-mini",     
+#     temperature=0.0,
+#     max_tokens=None,
+#     timeout=None,
+#     max_retries=2,
+#     api_key=os.getenv("OPENAI_API_KEY"),
+#     streaming=True,
+#     verbose=True
 # )
 
 generator_llm = ChatOllama(
@@ -68,6 +82,10 @@ def main():
         print("You'll need to parse job description first")
         return
     
+    company_input = input("Please enter the company name: ").strip()
+    print(" Researching company information...")
+
+    # Build Graph
     app = build_graph(generator_llm, critic_llm)
     
     # Initialize state
@@ -90,38 +108,27 @@ def main():
         "is_fallback": False,
         "final_response": "",
         "rewrite_count": 0,
-        # "suggested_company_name": "",
-        "company_name": "",
+        "company_name": company_input,
         "company_research": "",
         "needs_company_confirmation": False,
         "company_research_success": False
     }   
 
     try:
+
         print("\n Analyzing job description...")
         result = app.invoke(initial_state)
-        
-        company_input = input("Please enter the company name: ").strip()
-        result["company_name"] = company_input
-            
-        print(f" Company set to: {result['company_name']}")
-        result["needs_company_confirmation"] = False
-        
-        # Continue workflow with confirmed company name
-        print(" Researching company information...")
-        result = app.invoke(result)
 
-
-            # Check if fallback was triggered
+        # Check if fallback was triggered
         if result.get("is_fallback", False):
             print("FALLBACK RESPONSE: ")
             print(result.get("final_response", "An error occurred."))
             return
         
         print("Your Cover Letter is Ready")
-        print("---------------------------------")
+        print("--------------------------------- \n")
         print(result["cover_letter"])
-        print("---------------------------------")
+        print("\n ---------------------------------")
         print(f" Retrieval Score: {result['relevance_score']}/100")
         print(f" Refinement Iterations: {result['refinement_count']}")
 
