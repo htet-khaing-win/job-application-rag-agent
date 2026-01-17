@@ -74,8 +74,7 @@ def build_graph(generator_llm, critic_llm):
     workflow = StateGraph(GraphState)
 
     # Nodes
-    workflow.add_node("ingest_jd", partial(ingest_jd_node, llm=critic_llm))
-    # workflow.add_node("extract_company", partial(extract_company_name_node, llm=critic_llm))  
+    workflow.add_node("ingest_jd", partial(ingest_jd_node, llm=critic_llm))  
     workflow.add_node("research_company", partial(research_company_node, llm=critic_llm))  
     workflow.add_node("retrieve_resumes", partial(retrieve_resumes_node, llm=critic_llm))
     workflow.add_node("grade_retrieval", partial(grade_retrieval_node, llm=critic_llm))
@@ -90,23 +89,6 @@ def build_graph(generator_llm, critic_llm):
     # Edges
     workflow.add_edge(START, "ingest_jd")
     workflow.add_edge("ingest_jd", "research_company")
-    # workflow.add_conditional_edges(
-    #     "ingest_jd",
-    #     should_proceed_with_retrieval,
-    #     {
-    #         "extract_company": "extract_company",
-    #         "fallback_handler": "fallback_handler"
-    #     }
-    # )
-
-    # workflow.add_conditional_edges(
-    #     "extract_company",
-    #     needs_company_research,
-    #     {
-    #         "research_company": "research_company",
-    #         "retrieve_resumes": "retrieve_resumes"
-    #     }
-    # )
 
     workflow.add_edge("research_company", "retrieve_resumes")
     workflow.add_edge("retrieve_resumes", "grade_retrieval")
