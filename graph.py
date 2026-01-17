@@ -11,7 +11,7 @@ def should_rewrite_query(state: GraphState) -> str:
     """
     MAX_REWRITES = 2
     ACCEPTABLE_THRESHOLD = 60
-    current_score = state.relevance_score
+    current_score = state.llm_relevance_score
     current_rewrites = state.rewrite_count
 
     # If quality is acceptable, proceed
