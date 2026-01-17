@@ -1,326 +1,318 @@
-# Job Application RAG agent
+# Job Application RAG Agent
 
-> Multi-agent RAG system that generates personalized, ATS-optimized cover letters by intelligently matching candidate resumes to job descriptions using vector search, LLM orchestration, and privacy-first design.
-
-[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![LangGraph](https://img.shields.io/badge/LangGraph-Multi--Agent-green.svg)](https://langchain.com/langgraph)
-[![Pinecone](https://img.shields.io/badge/Pinecone-Vector_DB-orange.svg)](https://www.pinecone.io/)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+Multi-agent RAG system that generates personalized, ATS-optimized cover letters by matching candidate resumes to job descriptions using hybrid vector search, LLM orchestration, and privacy-first design.
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
 - [Overview](#overview)
 - [Key Features](#key-features)
 - [System Architecture](#system-architecture)
-- [Safety & Privacy Mechanisms](#safety--privacy-mechanisms)
-- [Technical Highlights](#technical-highlights)
-- [Installation Guide](#installation-guide)
-- [Usage Examples](#usage-examples)
+- [Safety & Privacy](#safety--privacy)
+- [Installation](#installation)
+- [Usage](#usage)
 - [Project Structure](#project-structure)
-- [Performance Metrics](#performance-metrics)
-- [Future Enhancements](#future-enhancements)
 - [Contributing](#contributing)
 - [License](#license)
 
 ---
 
-## 🎯 Overview
+  ## Overview
 
-I hate having to do repetitive work. So I created this workflow.
+I hate doing repetitive things. Especially writing cover letters when there's no guarantee a human will ever read them. I'm also skeptical about sharing my resume with LLMs, given the risks of leaking sensitive personal info, hallucinated qualifications and generic, AI-sounding output. So I automated the entire workflow. 
 
-### **The Problem**
-- Generic cover letters get rejected by ATS systems
-- Manual customization is time-consuming and inconsistent
-- AI-generated letters often contain hallucinated qualifications
-- Privacy concerns with uploading sensitive resume data
+This project turns a tedious, error-prone process into a structured, verifiable system that generates personalized, ATS-friendly cover letters without hallucinating qualifications or leaking sensitive data.
 
-### **The Solution**
-A stateful, multi-agent workflow that:
-1. **Validates** job descriptions for authenticity
-2. **Researches** company information using real-time web search
-3. **Retrieves** relevant candidate qualifications via semantic vector search
-4. **Verifies** every claim against source documents (anti-hallucination layer)
-5. **Generates** personalized cover letters with ATS keyword optimization
-6. **Critiques & Refines** output through iterative quality gates
+If this saves you time during job hunting, that's a win in my book.
+
+**Good Luck out there!**
 
 ---
 
-## ✨ Key Features
+## Key Features
 
-### 🔒 **Privacy-First Architecture**
-- **Presidio PII Guard Integration**: Automatically redacts personally identifiable information (names, emails, phone numbers, LinkedIn/GitHub URLs, locations, certificates) before vectorization
-- **Custom Burmese Name Recognition**: Extended NER model to support multi-cultural name patterns
-- **Local Processing**: All sensitive data processing happens on-device using Ollama LLMs
+### Privacy-First Architecture
+- **Presidio PII Guard**: Automatically redacts names, emails, phone numbers, URLs, locations, and certificates before vectorization
+- **Custom Burmese Name Recognition**: Extended NER model for multi-cultural name patterns
+- **Local Processing**: All data processing runs on-device using Ollama LLMs
 
-### 🧠 **Intelligent Document Processing**
-- **Multi-Format Support**: PDF, DOCX, TXT resume parsing with `pdfplumber` and `python-docx`
-- **Semantic Chunking**: Uses `SemanticChunker` from LangChain to split documents at natural conceptual boundaries (vs. arbitrary character limits)
-- **Namespace Isolation**: Pinecone namespaces ensure complete separation between candidate resumes (prevents cross-contamination)
+### Intelligent Document Processing
+- **Multi-Format Support**: PDF, DOCX, TXT parsing
+- **Section-Aware Chunking**: Detects resume sections (Experience, Education, Skills) for better retrieval
+- **Hybrid Search**: Combines dense embeddings (Nomic) with sparse BM25 for keyword matching
+- **Namespace Isolation**: Separate Pinecone namespaces prevent resume cross-contamination
 
-### 🎭 **Multi-Agent Orchestration**
-- **Dual-LLM Strategy**: 
-  - **Generator** (Mistral 7B): Creative, fluent text generation
-  - **Critic** (Qwen2.5 7B): Analytical grading and verification
-- **Stateful Graph Workflow**: LangGraph manages complex conditional routing and retry logic
-- **Iterative Refinement**: Up to 3 critique-refinement loops to polish output quality
+### Multi-Agent Orchestration
+- **Generator Agent**: Creative cover letter writing
+- **Critic Agent**: Analytical grading and verification
+- **Stateful Workflow**: LangGraph manages conditional routing and retry logic
+- **Iterative Refinement**: Up to 3 critique loops for quality
 
-### 🌐 **Real-Time Company Research**
-- **Tavily AI Integration**: Fetches current company mission, values, and recent news
-- **Contextual Personalization**: Opening paragraphs reference actual company initiatives (not generic "I'm excited about [Company]" statements)
+### Real-Time Company Research
+- **Tavily AI Integration**: Fetches company mission, values, and recent news
+- **Contextual Personalization**: References actual company initiatives in opening paragraphs
 
-### 🛡️ **Anti-Hallucination Safeguards**
-- **Claim Verification Node**: Cross-references every statement in the candidate summary against retrieved resume chunks
-- **Evidence Tracing**: Requires LLM to cite specific source quotes for each qualification
-- **Minimum Confidence Threshold**: Rejects summaries where <70% of claims are verifiable
-
----
-
-## 🏗️ System Architecture
-
-### **High-Level Flow Diagram**
-
-```
-<img width="510" height="943" alt="graph_flow" src="https://github.com/user-attachments/assets/54ad50c0-0f18-4fa4-933d-1618d50ddbdb" />
-
-```
-
-### **Component Breakdown**
-
-#### **1. Ingestion Pipeline** (`database.py`)
-```
-User Upload → Format Detection → Text Extraction → PII Redaction → 
-Semantic Chunking → Nomic Embeddings → Pinecone Upsert
-```
-
-#### **2. LangGraph Workflow** (`graph.py`)
-
-**Conditional Routing:**
-- **Query Rewriting**: If retrieval score < 60% (max 2 attempts)
-- **Fallback Handling**: Invalid JD, empty database, or severe mismatch
-- **Refinement Loop**: Up to 3 critique-driven rewrites
-
-#### **3. Privacy Layer** (`privacy.py`)
-
-**Presidio Configuration:**
-- **NLP Engine**: spaCy's `en_core_web_trf` (transformer-based NER)
-- **Custom Recognizers**:
-  - LinkedIn/GitHub URL patterns
-  - Phone number formats (international support)
-  - Certificate URLs (Credly, Coursera, badges.alignment.org)
-  - Burmese name dictionary (50+ common components)
-
+### Anti-Hallucination Safeguards
+- **Claim Verification Node**: Cross-references every statement against resume chunks
+- **Skill Classification**: Separates skills with project evidence from skills only listed
+- **Post-Generation Detection**: Auto-removes sentences with unverified claims
+- **Transfer Learning Prompts**: Addresses unverified skills through demonstrated adaptability
 
 ---
 
-## 🛡️ Safety & Privacy Mechanisms
+## System Architecture
 
-### **1. PII Protection**
-### **2. Hallucination Prevention**
-### **3. Error Handling**
+### High-Level Flow
 
----
-
-## 🔧 Technical Highlights
-
-- **Cross-Namespace Search**: Queries all uploaded resumes simultaneously
-- **Score-Based Filtering**: Only high-confidence matches reach the LLM
-- **Top-K Aggregation**: Combines best chunks across resumes (diversity)
-
-### **Dual-LLM Orchestration**
-```python
-generator_llm = ChatOllama(model="mistral:7b", temperature=0.7)  # Creative
-critic_llm = ChatOllama(model="qwen2.5:7b", temperature=0.0)     # Analytical
+```
+[HITL: User pastes Job Description + Company Name]
+                    ↓
+Job Description → Validation → Company Research → Vector Retrieval
+                                                           ↓
+                                        Resume Chunks → LLM Grading
+                                                           ↓
+                                        Grade ≥60% → Generate Summary
+                                                           ↓
+                                        Claim Verification → Cover Letter
+                                                           ↓
+                                        Critique → Refine (max 3x) 
+                                                           ↓
+                            [HITL: Review Generated Cover Letter]
 ```
 
-**Role Specialization:**
-| Agent | Model | Temperature | Purpose |
-|-------|-------|-------------|---------|
-| **Generator** | Mistral 7B | 0.7 | Fluent, natural cover letter prose |
-| **Critic** | Qwen2.5 7B | 0.0 | Deterministic scoring and verification |
+### Component Breakdown
+
+**1. Ingestion Pipeline** (`database.py`)
+```
+Resume → Format Detection → Text Extraction → PII Redaction → 
+Section Splitting → Chunking → Nomic + BM25 Embeddings → Pinecone
+```
+
+**2. Retrieval System**
+- **Hybrid Search**: α=0.4 weighting (60% dense, 40% sparse)
+- **Cross-Namespace**: Queries all resumes simultaneously
+- **Top-K Selection**: Retrieves 10 best chunks across all resumes
+
+**3. Verification Layer**
+- **Skills with Evidence**: Project-backed claims (specific metrics allowed)
+- **Skills without Evidence**: Listed skills (generic mention only)
+- **Unverified Skills**: Job requirements not in resume (transfer learning approach)
 
 ---
 
-## 📦 Installation Guide
+## Safety & Privacy
 
-### **Prerequisites**
-- Python
+### PII Protection
+**Presidio Configuration**:
+- NLP Engine: spaCy's `en_core_web_trf` (transformer-based)
+- Custom patterns: LinkedIn, GitHub, phone numbers
+- Burmese name dictionary: 50+ common name components
+
+**Redaction Examples**:
+```
+Original: "Htet Khaing Win, +1-555-123-4567, linkedin.com/in/htetkhaingwin"
+Redacted: "[CANDIDATE_NAME], [PHONE_NUMBER], [LINKEDIN_URL]"
+```
+
+### Hallucination Prevention
+**Multi-Layer Defense**:
+1. **Prompt Engineering**: Explicit allow/deny skill lists
+2. **Post-Generation Check**: Regex detection of unverified skills
+3. **Auto-Fix**: Sentence removal with fallback to error state
+4. **Minimum Content**: Rejects letters <200 words after cleanup
+
+**Example Detection**:
+```
+Detected: "I have extensive Terraform experience"
+Resume: Terraform not mentioned anywhere
+Action: Remove sentence or trigger fallback
+```
+
+### Error Handling
+**Fallback Triggers**:
+- Invalid job description format
+- Empty resume database
+- Retrieval score <50% after 2 rewrite attempts
+- Verification failure (insufficient verifiable skills)
+- Hallucination detected in final output
+
+---
+
+## Installation
+
+### Prerequisites
+- Python 3.9+
 - [Ollama](https://ollama.ai/) installed and running
-- Pinecone account (free tier sufficient)
+- Pinecone account (free tier)
 - Tavily API key (free tier: 1000 requests/month)
 
-### **Step 1: Clone Repository**
+### Step 1: Clone Repository
 ```bash
 git clone https://github.com/htet-khaing-win/job-application-rag-agent.git
+cd job-application-rag-agent
 ```
 
-### **Step 2: Install Dependencies**
+### Step 2: Install Dependencies
 ```bash
 pip install -r requirements.txt
-python -m spacy download en_core_web_trf  # Presidio NLP model
+python -m spacy download en_core_web_trf
 ```
 
-### **Step 3: Download Ollama Models**
+### Step 3: Download Ollama Models or Get your own API keys
 ```bash
 ollama pull mistral:7b-instruct
 ollama pull qwen2.5:7b
 ollama pull nomic-embed-text
 ```
 
-### **Step 4: Configure Environment Variables**
-Create a `.env` file in the project root:
+### Step 4: Configure Environment
+Create `.env` file:
 ```env
 PINECONE_API_KEY=your_pinecone_api_key
 TAVILY_API_KEY=your_tavily_api_key
 ```
 
-**Get Your API Keys:**
-- **Pinecone**: https://app.pinecone.io/ → "API Keys" → Create Key
-- **Tavily**: https://app.tavily.com/ → Sign up → Copy API Key
+**Get API Keys**:
+- Pinecone: https://app.pinecone.io/ → API Keys → Create Key
+- Tavily: https://app.tavily.com/ → Sign up → Copy Key
 
-### **Ingest Resume(s)**
+### Step 5: Fit BM25 Model
+**IMPORTANT**: Run this before ingesting resumes to enable hybrid search.
+
 ```bash
-python database.py /path/to/your/resume.pdf
+python utilities/Fitting.py
 ```
 
-**Supported Formats:**
-- `.pdf` (multi-page support)
-- `.docx` (Microsoft Word)
-- `.txt` (plain text)
+This creates `utilities/fitted_bm25.json` for sparse vector encoding. Without this, the system falls back to default (cold) BM25 encoder with reduced accuracy.
 
-**Validation:**
-- Max file size: 5MB
-- Automatic PII redaction applied
-- Duplicate filenames trigger cascading delete
+### Step 6: Ingest Resumes
+```bash
+python database.py /path/to/resume.pdf
+```
+
+**Supported formats**: PDF, DOCX, TXT  
+**Max file size**: 5MB  
+**Auto-applies**: PII redaction, section detection, chunking
 
 ---
 
-## 💡 Usage Examples
+## Usage
 
-### **Example 1: Personalized Cover Letter Generation**
+### Generate Cover Letter
 
 ```bash
 python main.py
 ```
 
-**Input (Paste when prompted):**
+**Interactive Flow**:
 ```
-Senior Machine Learning Engineer
-PooPooPeePee AI is seeking an ML Engineer with 5+ years of experience in production ML systems, 
-proficiency in PyTorch/TensorFlow, and strong skills in MLOps. The ideal candidate 
-has deployed models at scale and contributed to open-source ML projects.
+Paste your Job Description below.
+When finished, type 'DONE' on a new line and press Enter.
+
+[Paste job description here]
 DONE
-```
 
-**Output:**
-```
-Company name detected: PooPooPeePee AI
-Researching company information...
-Retrieved 5 relevant resume chunks (Match Score: 87.3%)
-
-Your Cover Letter is Ready:
+Please enter the company name: PeePeePooPooAI
+ Researching company information...
+ Retrieved 10 relevant chunks. Top Match Score: 87.3%.
+ 
+Your Cover Letter is Ready
 ---------------------------------
-Dear Hiring Manager,
 
-I am writing to express my interest in the Senior Machine Learning Engineer 
-position at Acme AI. Having followed your recent launch of the AutoML platform 
-that democratizes model deployment for non-technical users, I am excited about 
-the opportunity to contribute to your mission of making AI accessible.
+With 3 years of experience building production ML systems, including a 
+recommendation engine that processes 2M+ daily requests with 40ms latency, 
+I'm excited to apply for the Senior ML Engineer position at PeePeePooPooAI...
 
-In my previous role, I architected a real-time recommendation engine processing 
-2M+ daily requests with 40ms p99 latency, leveraging PyTorch and Kubernetes-based 
-model serving. This system increased user engagement by 23% while reducing 
-infrastructure costs by 35% through model quantization and efficient batching...
+[Full letter]
 
-[Rest of letter]
 ---------------------------------
  Retrieval Score: 87/100
  Refinement Iterations: 2
 ```
 
-### **Example 2: Researching Company Background**
+### Low Match Example
 
-```bash
-python main.py
+**Input**: Job requiring skills not in resume  
+**Output**:
+```
+Quality Check Failed - Unverified Claims Detected
+
+Cover letter contained unverified claims about: Terraform, Kubernetes. 
+Auto-fix resulted in insufficient content (156 words).
+
+Solutions:
+1. Upload a resume matching this role better
+2. Try a job posting aligned with your background
+3. Ensure resume includes specific project descriptions
 ```
 
-**Input:**
-```
-We're looking for a DevOps Engineer with Kubernetes and Terraform experience...
-DONE
-```
+### Manage Resumes
 
-**System Prompt:**
-```
-Please enter the company name: TechCorp
- Company set to: TechCorp
- Researching company information...
+**List stored resumes**:
+```python
+from database import list_stored_resumes
+print(list_stored_resumes())
 ```
 
-### **Example 3: Low Match Scenario (Fallback)**
-
-**Job Description:** "Seeking a Registered Nurse with ICU experience..."
-
-**Output:**
-```
-I couldn't find a strong match between your resumes and this job description.
-
-Suggestions:
-- Upload a more relevant resume for this role
-- Ensure the job description is complete and specific
-- Try a different position that better matches your background
-
-Would you like to try a different job description?
+**Delete resume**:
+```python
+from database import delete_resume_from_pinecone
+delete_resume_from_pinecone("resume.pdf")
 ```
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 job-application-rag-agent/
 │
-├── main.py                 # Entry point and orchestration
+├── main.py                 # Entry point and CLI
 ├── graph.py                # LangGraph workflow definition
-├── node.py                 # Individual agent nodes (ingest, generate, critique, etc.)
-├── state.py                # Pydantic state model
-├── database.py             # Pinecone operations and resume ingestion
-├── privacy.py              # Presidio PII Guard configuration
+├── node.py                 # Agent nodes (generate, verify, critique)
+├── state.py                # Pydantic state schema
+├── database.py             # Pinecone operations and ingestion
+├── privacy.py              # Presidio PII configuration
 │
-├── requirements.txt        # Python dependencies
-├── .env                    # Template for environment variables
-├── README.md               # This file
+├── utilities/
+│   ├── Fitting.py          # BM25 model fitting (run first)
+│   └── fitted_bm25.json    # Generated sparse encoder
 │
-├── graph.png               # LangGraph visualization (generated)
-└── resumes/                # Sample test resumes (add to gitignore)
+├── requirements.txt        # Dependencies
+├── .env                    # API keys (gitignored)
+└── README.md               # This file
 ```
 
-### **Scalability**
-- **Concurrent Users**: Single-user CLI 
-- **Resume Limit**: No hard cap 
+### Key Files
+
+**`database.py`**:
+- `ingest_resume_to_pinecone()`: PII redaction + vectorization
+- `retrieve_resumes_node()`: Hybrid search across all resumes
+- `split_by_sections()`: Resume section detection
+
+**`node.py`**:
+- `verify_claims_node()`: Cross-references summary against resume
+- `write_cover_letter_node()`: Generation with hallucination check
+- `critique_letter_node()`: Quality evaluation
+
+**`graph.py`**:
+- Conditional routing (rewrite, refine, fallback)
+- Dual-LLM orchestration (generator vs critic)
 
 ---
 
-## Future Enhancements
-
-### **Planned Features**
-- [ ] **Web Interface**: Frontend for non-technical users
-- [ ] **Hybrid Search**: Combine vector search with keyword filters
-- [ ] **Caching Layer**: Redis for frequently requested company research
-
----
-
-### **Development Setup**
+## Development Setup
 ```bash
-pip install -r requirements.txt        # Install Dependencies
-python database.py <Your Resume File>  # Add Resume to Pinecone Vector DB
-pytest tests/                          # Run test suite
+pip install -r requirements.txt
+python utilities/Fitting.py
+python database.py test_resume.pdf
+pytest tests/
 ```
 
+
+## License
+
+MIT License - see [LICENSE](LICENSE) file for details.
+
 ---
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
