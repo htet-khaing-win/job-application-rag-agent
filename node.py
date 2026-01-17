@@ -62,37 +62,6 @@ def ingest_jd_node(state: GraphState, llm) -> dict:
     }
 
 
-# def extract_company_name_node(state: GraphState, llm) -> dict:
-#     """
-#     Attempts to extract company name from JD, but marks as requiring user confirmation.
-#     """
-    
-#     prompt = f"""
-#     ROLE: You are an HR document parser.
-
-#     TASK: Extract the company name from this job description.
-
-#     INPUT:
-#     {state.cleaned_jd}
-
-#     INSTRUCTIONS:
-#     1. Look for explicit company identification (e.g., "About [Company]", "Join [Company]")
-#     2. If no company name is found, return "UNKNOWN"
-#     3. Return ONLY the company name, no explanation
-
-#     OUTPUT: [Company Name] or UNKNOWN
-#     """
-    
-#     response = llm.invoke(prompt)
-#     extracted_name = response.content.strip().replace('"', '')
-    
-#     # Mark as requiring confirmation
-#     return {
-#         "suggested_company_name": extracted_name,
-#         "needs_company_confirmation": True
-#     }
-
-
 def research_company_node(state: GraphState, llm) -> dict:
     """
     Uses Tavily AI to fetch real-time company information. This runs AFTER user confirms the company name.
@@ -104,12 +73,6 @@ def research_company_node(state: GraphState, llm) -> dict:
     """
     
     company_name = state.company_name
-    
-    # if not company_name or company_name == "UNKNOWN":
-    #     return {
-    #         "company_research": "No company information available.",
-    #         "company_research_success": False
-    #     }
     
     try:
         # Tavily search query
@@ -259,7 +222,7 @@ def fallback_handler_node(state: GraphState, llm) -> dict:
     Triggers:
         - state.is_valid_jd == False (invalid input)
         - state.error_type == "no_resumes" (empty database)
-        - state.relevance_score < 50 after 2 rewrites (severe mismatch)
+        - state.llm_relevance_score < 50 after 2 rewrites (severe mismatch)
     """
     
     if state.error_type == "invalid_input":
@@ -280,9 +243,9 @@ def fallback_handler_node(state: GraphState, llm) -> dict:
     Please upload your resume first using the file upload feature, then paste the job description again.
     """
     
-    elif state.relevance_score < 50:
+    elif state.llm_relevance_score < 50:
         message = f"""
-    I couldn't find a strong match between your resumes and this job description (relevance: {state.relevance_score}%).
+    I couldn't find a strong match between your resumes and this job description (relevance: {state.llm_relevance_score}%).
 
     Suggestions:
     - Upload a more relevant resume for this role
@@ -376,7 +339,7 @@ def grade_retrieval_node(state: GraphState, llm) -> dict:
     print(f" Grading Result: Score={score}")
     
     return {
-        "relevance_score": score,
+        "llm_relevance_score": score,
         "grading_feedback": reasoning
     }
 
