@@ -12,6 +12,7 @@ import time
 from privacy import PIIGuard
 import sys
 from pinecone_text.sparse import BM25Encoder
+import re
 
 load_dotenv()
 pii_guard = PIIGuard()
@@ -26,6 +27,49 @@ if os.path.exists(BM25_PATH):
 else:
     print(" WARNING: No fitted BM25 found. Using default (cold) encoder.")
     bm25 = BM25Encoder.default()
+
+SECTION_PATTERNS = {
+    "EXPERIENCE": r"(WORK EXPERIENCE|PROFESSIONAL EXPERIENCE|EMPLOYMENT|CAREER HISTORY)",
+    "EDUCATION": r"(EDUCATION|ACADEMIC BACKGROUND|UNIVERSITY)",
+    "SKILLS": r"(SKILLS|TECHNICAL SKILLS|CORE COMPETENCIES|TECHNOLOGIES)",
+    "PROJECTS": r"(PROJECTS|PERSONAL PROJECTS|KEY PROJECTS)",
+    "CERTIFICATIONS": r"(CERTIFICATIONS?|CERTIFICATES?|LICENSES)",
+    "SUMMARY": r"(SUMMARY|PROFILE|ABOUT|OBJECTIVE)"
+}
+
+def split_by_sections(text: str):
+    """Extract resume sections with fallback."""
+    sections = []
+    current_section = "OTHER"
+    buffer = []
+
+    for line in text.splitlines():
+        line_stripped = line.strip()
+        if not line_stripped:
+            buffer.append(line)
+            continue
+            
+        upper = line.upper()
+        matched = False
+
+        for section, pattern in SECTION_PATTERNS.items():
+            if re.search(pattern, upper):
+                # Save previous section
+                if buffer:
+                    sections.append((current_section, "\n".join(buffer)))
+                buffer = []
+                current_section = section
+                matched = True
+                break
+
+        if not matched:
+            buffer.append(line)
+
+    # Don't forget last section
+    if buffer:
+        sections.append((current_section, "\n".join(buffer)))
+
+    return sections
 
 def get_index(index_name: str, dimension: int = 768):
     """
@@ -86,7 +130,20 @@ def parse_docx(file_path):
     return "\n".join(p.text for p in doc.paragraphs)
 
 def clean_text(text):
-    return " ".join(text.split()).strip()
+    """
+    Clean excessive whitespace while preserving document structure.
+    
+    - Converts multiple spaces to single space within lines
+    - Preserves line breaks for section detection
+    - Removes completely empty lines
+    """
+    lines = []
+    for line in text.splitlines():
+        cleaned_line = ' '.join(line.split())  # Multiple spaces to one
+        if cleaned_line:  # Skip completely empty lines
+            lines.append(cleaned_line)
+    
+    return '\n'.join(lines)
 
 # Ingestion Flow 
 def ingest_resume_to_pinecone(file_path):
@@ -130,19 +187,53 @@ def ingest_resume_to_pinecone(file_path):
     
     # Redact the sensitive infor before processing
     safe_text = pii_guard.redact_text(text)
-    cleaned = clean_text(safe_text)
-    
-    
-    # Chunking
-    splitter = SemanticChunker(embeddings, breakpoint_threshold_type="percentile")
-    chunks = splitter.split_text(cleaned)
 
+    # Section detection
+    sections = split_by_sections(safe_text)
+
+    
+    cleaned_sections = []
+
+    for section_name, section_text in sections:
+    # Clean excessive whitespace WITHIN lines, but preserve line breaks
+        cleaned_text = re.sub(r'[ \t]+', ' ', section_text)  # Multiple spaces
+        cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text)  # Multiple newlines
+        cleaned_sections.append((section_name, cleaned_text.strip()))
+
+    sections = cleaned_sections
+
+    # Chunking
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=600,
+        chunk_overlap=50,
+        separators=["\n\n", "\n", ". ", ", ", " ", ""]
+    )
+    
+    chunks_with_meta = []
+    for section_name, section_text in sections:
+        if len(section_text.strip()) < 20:  # Skip empty sections
+            continue
+            
+        section_chunks = splitter.split_text(section_text)
+        
+        for chunk in section_chunks:
+            chunk_clean = chunk.strip()
+            if len(chunk_clean) < 30:  # Filter junk
+                continue
+                
+            chunks_with_meta.append({
+                "text": chunk_clean,
+                "section": section_name
+            })
+
+    # Extract text for embedding
+    texts = [c["text"] for c in chunks_with_meta]
     # generate vectors (dense+sparse)
-    dense_vectors = embeddings.embed_documents(chunks)
+    dense_vectors = embeddings.embed_documents(texts)
 
     # bm25.fit(chunks)
     # generate the keyword weight for every chunk
-    sparse_vectors = bm25.encode_documents(chunks)
+    sparse_vectors = bm25.encode_documents(texts)
     
     # Cascading Delete (Deleting Chunks if the upload file has the same name)
     print(f" Checking for existing records of {filename}...")
@@ -154,13 +245,14 @@ def ingest_resume_to_pinecone(file_path):
     # Embedding & Upserting
     vectors = []
 
-    for i, (chunk, dense, sparse) in enumerate(zip(chunks, dense_vectors, sparse_vectors)):
+    for i, (chunk_obj, dense, sparse) in enumerate(zip(chunks_with_meta, dense_vectors, sparse_vectors)):
         vectors.append({
             "id": f"{filename}#{i}", # "#" symbol is there for ID to be more deterministic
             "values": dense,
             "sparse_values": sparse,
             "metadata": {
-                "text": chunk, 
+                "text": chunk_obj["text"],
+                "section": chunk_obj["section"],
                 "source": filename,
                 "doc_type": "resume",
                 "ingested_at": time.time() 
