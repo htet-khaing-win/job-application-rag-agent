@@ -98,7 +98,7 @@ def main():
         "resume_summary" : "",
         "cover_letter" : "",
         "critique_feedback" : "",
-        "vector_relevance_score": 0.0,
+        "vector_relevance_score": None,
         "llm_relevance_score" : 0,
         "needs_rewrite" : False,
         "grading_feedback" : "",
