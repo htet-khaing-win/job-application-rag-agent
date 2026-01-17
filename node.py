@@ -472,7 +472,13 @@ def write_cover_letter_node(state: GraphState, llm) -> dict:
     - Use placeholders: [{state.company_name if hasattr(state, 'company_name') else 'Company Name'}]
 
     VERIFICATION CHECK:
-    Before finalizing, ensure every claim can be traced back to "Source Resume Evidence".
+    Before finalizing, ensure every claim can be traced back to "Source Resume Evidence". However, do not explicitly mention it in the coverletter.
+
+    FORBIDDEN PHRASES:
+    - "Source:"
+    - "Job Requirements:"
+    - "According to..."
+    - Any text in parentheses that references sources
 
     OUTPUT FORMAT:
     Return ONLY the cover letter body text. No preamble or commentary.
@@ -514,6 +520,7 @@ def critique_letter_node(state: GraphState, llm) -> dict:
     3. Relevance: Does it address the top 3 job requirements directly?
     4. Tone: Is it confident but not arrogant?
     5. ATS Optimization: Does it include critical keywords naturally?
+    6. Hallucination Prevention: Does the cover letter using the skills and qualifications as claims that are not part of the retrieved resume chunks? 
     
     OUTPUT FORMAT:
     Strengths: 2-3 specific positives
@@ -588,7 +595,7 @@ def rewrite_query_node(state: GraphState, llm) -> dict:
     Critic Feedback: {state.grading_feedback}
     
     Task: Rewrite the search query to be more effective at finding relevant resume chunks in a vector database.
-    Focus on technical keywords and core requirements.
+    Focus on technical keywords and core requirements that are direct match to the job description.
     """
     response = llm.invoke(prompt)
     return {
