@@ -1,50 +1,51 @@
-# from langchain_google_genai import ChatGoogleGenerativeAI
-# from langchain_openai import ChatOpenAI
-from langchain_ollama import ChatOllama
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
+# from langchain_ollama import ChatOllama
 import os
 from dotenv import load_dotenv
 from graph import build_graph
+import asyncio
 
 load_dotenv()
 
-# generator_llm = ChatGoogleGenerativeAI(
-#     model="gemini-2.5-flash",
-#     temperature=0.0, 
-#     max_tokens=None,
-#     timeout=None,
-#     max_retries=2,
-#     api_key = os.getenv("GEMINI_API_KEY"),
-#     streaming=True,
-#     verbose=True
-# )
-
-# critic_llm = ChatOpenAI(
-#     model="gpt-4o-mini",     
-#     temperature=0.0,
-#     max_tokens=None,
-#     timeout=None,
-#     max_retries=2,
-#     api_key=os.getenv("OPENAI_API_KEY"),
-#     streaming=True,
-#     verbose=True
-# )
-
-generator_llm = ChatOllama(
-    model="mistral:7b-instruct",
-    temperature=0.7, # To be creative
-    num_ctx=4096,
-    num_gpu=35,
+generator_llm = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash",
+    temperature=0.0, 
+    max_tokens=None,
+    timeout=None,
+    max_retries=2,
+    api_key = os.getenv("GEMINI_API_KEY"),
+    streaming=True,
+    verbose=True
 )
 
-# Critic: Optimized for structural analysis and fault-finding
-critic_llm = ChatOllama(
-    model="qwen2.5:7b",
-    temperature=0.0,      
-    num_ctx=4096, # For latnecy Tradeoff
-    num_gpu=35,
+critic_llm = ChatOpenAI(
+    model="gpt-4o-mini",     
+    temperature=0.0,
+    max_tokens=None,
+    timeout=None,
+    max_retries=2,
+    api_key=os.getenv("OPENAI_API_KEY"),
+    streaming=True,
+    verbose=True
 )
 
-def main():
+# generator_llm = ChatOllama(
+#     model="mistral:7b-instruct",
+#     temperature=0.7, # To be creative
+#     num_ctx=8192,
+#     num_gpu=35,
+# )
+
+# # Critic: Optimized for structural analysis and fault-finding
+# critic_llm = ChatOllama(
+#     model="qwen2.5:7b",
+#     temperature=0.0,      
+#     num_ctx=4096, # For latnecy Tradeoff
+#     num_gpu=35,
+# )
+
+async def main():
     """
     Orchestrator for the Job Application Assistant.
     
@@ -118,7 +119,16 @@ def main():
     try:
 
         print("\n Analyzing job description...")
-        result = app.invoke(initial_state)
+        result = await app.ainvoke(
+            initial_state, config = {
+                "run_name": "job_application_run",
+                "tags": ["langgraph", "async", "cover-letter"],
+                "metadata": {
+                    "company": company_input,
+                    "has_research": bool(company_input),
+                }
+            }
+        )
 
         # Check if fallback was triggered
         if result.get("is_fallback", False):
@@ -130,7 +140,6 @@ def main():
         print("--------------------------------- \n")
         print(result["cover_letter"])
         print("\n ---------------------------------")
-        print(f" Retrieval Score: {result['vector_relevance_score']}/100")
         print(f" Refinement Iterations: {result['refinement_count']}")
 
 
@@ -138,4 +147,4 @@ def main():
         print(f" Error during processing: {str(e)}")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

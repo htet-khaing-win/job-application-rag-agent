@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 from pinecone import Pinecone, ServerlessSpec
-# from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_ollama import OllamaEmbeddings
 from state import GraphState
 from docx import Document
@@ -13,6 +13,8 @@ from privacy import PIIGuard
 import sys
 from pinecone_text.sparse import BM25Encoder
 import re
+import asyncio
+from langsmith import traceable
 
 load_dotenv()
 pii_guard = PIIGuard()
@@ -107,14 +109,14 @@ def get_index(index_name: str, dimension: int = 768):
 
 index = get_index(index_name="resume-index", dimension=768)
 
-# embeddings = GoogleGenerativeAIEmbeddings(
-#     model="models/text-embedding-004",
-#     google_api_key=os.getenv("API_KEY") 
-# )
-
-embeddings = OllamaEmbeddings(
-    model="nomic-embed-text" 
+embeddings = GoogleGenerativeAIEmbeddings(
+    model="models/text-embedding-004",
+    google_api_key=os.getenv("GEMINI_API_KEY") 
 )
+
+# embeddings = OllamaEmbeddings(
+#     model="nomic-embed-text" 
+# )
 
 # Helpers
 def parse_pdf(file_path):
@@ -301,8 +303,8 @@ def validate_resume_file(file_path):
     
     return True, "Completed"
 
-
-def retrieve_resumes_node(state: GraphState, llm) -> dict:
+@traceable(run_type="tool", name="pinecone_retrieval")
+async def retrieve_resumes_node(state: GraphState, llm) -> dict:
     """
     The Researcher - Queries Pinecone vector database for relevant resume chunks.
     
@@ -315,8 +317,8 @@ def retrieve_resumes_node(state: GraphState, llm) -> dict:
     Output: state.retrieved_chunks - List of resume text chunks with scores
     
     """
-    dense_query = embeddings.embed_query(state.cleaned_jd)
-    sparse_query = bm25.encode_queries(state.cleaned_jd)
+    dense_query = await asyncio.to_thread(embeddings.embed_query, state.cleaned_jd)
+    sparse_query = await asyncio.to_thread(bm25.encode_queries, state.cleaned_jd)
     all_matches = []
     resume_list = list_stored_resumes()
 
@@ -328,23 +330,25 @@ def retrieve_resumes_node(state: GraphState, llm) -> dict:
             "grading_feedback": "Database is empty. Please upload resumes first.",
             "vector_relevance_score": 0.0
         }
+    
+    # Helper function for Pinecone query
+    def query_namespace(namespace):
+        return index.query(
+            vector=dense_query,
+            sparse_vector=sparse_query, 
+            top_k=10,
+            include_metadata=True,
+            alpha=0.4,
+            namespace=namespace
+        )
 
     # Cross-namespace search
     for names in resume_list:
         try:
-            resume = index.query(
-                vector=dense_query,
-                sparse_vector=sparse_query, 
-                top_k=10,
-                include_metadata=True,
-                alpha=0.4,
-                namespace = names
-            )
+            resume = await asyncio.to_thread(query_namespace, names)
             all_matches.extend(resume['matches'])
         except Exception as e:
             print(f"Error querying namespace {names}: {str(e)}")
-
-    # valid_matches = [m for m in all_matches if m['score'] >= 0.65]
 
     if not all_matches:
         return {
@@ -375,7 +379,7 @@ def retrieve_resumes_node(state: GraphState, llm) -> dict:
     ]
 
     vector_score = round(final_matches[0]['score'] * 100, 2)
-    print(f" Retrieved {len(retrieved_chunks)} relevant chunks. Top Match Score: {vector_score}%.")
+    print(f" Retrieved {len(retrieved_chunks)} relevant chunks.")
 
     return {
         "retrieved_chunks": retrieved_chunks, 

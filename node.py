@@ -6,6 +6,8 @@ from state import GraphState
 import json
 import re
 from tavily import TavilyClient
+import asyncio
+from langsmith import traceable
 
 load_dotenv()
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
@@ -50,15 +52,14 @@ def ingest_jd_node(state: GraphState, llm) -> dict:
         "is_valid_jd": True
     }
 
-
-def research_company_node(state: GraphState, llm) -> dict:
+@traceable(run_type="tool", name="tavily_company_research")
+async def research_company_node(state: GraphState) -> dict:
     """
     Uses Tavily AI to fetch real-time company information. This runs AFTER user confirms the company name.
     
     Purpose:
         - Fetches company mission, values, recent news
         - Provides grounding for personalized cover letter opening
-        - Reduces generic "I'm excited about [Company]" statements
     """
     
     company_name = state.company_name
@@ -70,28 +71,27 @@ def research_company_node(state: GraphState, llm) -> dict:
         search_results = tavily_client.search(
             query=search_query,
             search_depth="advanced",
-            max_results=5
+            max_results=3
         )
         
+        
         # Extract relevant information
-        research_text = f"Company: {company_name}\n\n"
+        research_snippets = []
         
         for result in search_results.get('results', []):
-            research_text += f"Source: {result.get('title', 'N/A')}\n"
-            research_text += f"{result.get('content', '')}\n\n"
+            title = result.get('title', 'N/A')
+            content = result.get('content', '')[:300]  # Truncate to 300 chars per source
+            
+            if content:
+                research_snippets.append(f"• {title}: {content}")
         
-        # Use LLM to synthesize research into usable summary
-        synthesis_prompt = f"""Synthesize into 100-150 words:
-        - Company Overview: 2-3 mission/values
-        - Recent Developments: 1-2 items from past 6mo
-        - Culture Insights: unique aspects
-
-        {research_text}"""
-        
-        synthesis_response = llm.invoke(synthesis_prompt)
+        if research_snippets:
+            company_research = f"Company: {company_name}\n\n" + "\n\n".join(research_snippets)
+        else:
+            company_research = f"Company: {company_name} (limited public information available)"
         
         return {
-            "company_research": synthesis_response.content,
+            "company_research": company_research,
             "company_research_success": True
         }
         
@@ -638,36 +638,62 @@ def critique_letter_node(state: GraphState, llm) -> dict:
         - state.critique_feedback - Structured improvement suggestions
         - state.needs_refinement - Boolean flag for rewrite loop
     """
-    prompt = f"""Critique cover letter against job requirements:
 
-    CRITERIA:
-    - Specificity: concrete examples/metrics?
-    - Originality: avoid clichés ("passionate", "team player")?
-    - Relevance: addresses top 3 requirements?
-    - Tone: confident not arrogant?
-    - ATS: critical keywords natural?
-    - Hallucination: only verified resume claims?
+    prompt = f"""You are a diff generator for cover letter refinement.
+
+    TASK: Identify 0-5 HIGH-IMPACT edits only. Each edit must:
+    - Target a specific 15-30 character phrase (for exact matching)
+    - Provide a direct replacement (max 2 sentences)
+    - Fix only: generic phrases, missing keywords, weak metrics, or ATS mismatches
+
+    IGNORE: Minor word choices, stylistic preferences, overall structure.
 
     COVER LETTER: {state.cover_letter}
 
-    JOB REQUIREMENTS: {state.cleaned_jd}
+    JOB REQUIREMENTS (top 5 only): {state.cleaned_jd[:500]}
 
-    OUTPUT:
-    Strengths: 2-3 positives
-    Issues to Fix: numbered, with line references
-    Recommended Changes: specific rewrites
-    Ready to Submit?: YES/NO"""
+    OUTPUT (strict JSON, no markdown):
+    {{
+    "edits": [
+        {{
+        "type": "replace",
+        "target": "I am passionate about technology",
+        "replacement": "I built 3 production ML pipelines processing 2M+ records",
+        "reason": "Replace generic phrase with verified metric"
+        }}
+    ],
+    "severity": "minor",
+    "ready_to_submit": true
+    }}
 
+    RULES:
+    - If 0 edits needed: {{"edits": [], "ready_to_submit": true}}
+    - Max 5 edits per iteration
+    - Only target phrases that materially affect ATS scoring or hiring manager perception
+    - NEVER suggest full paragraph rewrites
+    """
+    
     response = llm.invoke(prompt)
+    content = response.content.strip().replace("```json", "").replace("```", "")
     
-    # Determine if refinement is needed
-    needs_refinement = "NO" in response.content.split("Ready to Submit?")[-1]
-    
-    return {
-        "critique_feedback": response.content,
-        "needs_refinement": needs_refinement
-    }
-
+    try:
+        data = json.loads(content)
+        edits = data.get("edits", [])
+        ready = data.get("ready_to_submit", len(edits) == 0)
+        
+        return {
+            "critique_feedback": json.dumps(data, indent=2),  # For logging
+            "refinement_edits": edits,  # NEW: Structured edits
+            "needs_refinement": not ready and len(edits) > 0
+        }
+        
+    except json.JSONDecodeError as e:
+        print(f"Critique parse error: {e}")
+        return {
+            "refinement_edits": [],
+            "needs_refinement": False,
+            "ready_to_submit": True
+        }
 
 # REFINE LETTER (The Editor)
 
@@ -687,24 +713,62 @@ def refine_letter_node(state: GraphState, llm) -> dict:
         - state.cover_letter - Refined version (overwrites)
         - state.refinement_count - Iteration tracker
     """
-    current_count = state.refinement_count + 1
     
-    prompt = f"""Revise cover letter (iteration {current_count}/3):
-    - Address EVERY "Issues to Fix"
-    - Implement "Recommended Changes" exactly
-    - Preserve strengths, structure, word count
-    - Ensure natural flow
+    edits = state.refinement_edits
+    letter = state.cover_letter
+    
+    if not edits:
+        return {
+            "cover_letter": letter,
+            "needs_refinement": False,
+            "refinement_count": state.refinement_count
+        }
+    
+    for edit in edits:
+        edit_type = edit.get("type")
+        target = edit.get("target", "")
+        
+        if edit_type == "replace":
+            replacement = edit.get("replacement", "")
+            if target in letter:
+                letter = letter.replace(target, replacement, 1)  # Only first occurrence
+                print(f"Replaced: '{target[:40]}...'")
+            else:
+                print(f"Target not found: '{target[:40]}...'")
+        
+        elif edit_type == "delete":
+            if target in letter:
+                letter = letter.replace(target, "", 1)
+                # Clean up double spaces
+                letter = re.sub(r'\s{2,}', ' ', letter)
+                print(f"Deleted: '{target[:40]}...'")
+        
+        elif edit_type == "insert_after":
+            anchor = edit.get("anchor", "")
+            content = edit.get("content", "")
+            if anchor in letter:
+                letter = letter.replace(anchor, f"{anchor} {content}", 1)
+                print(f"Inserted after: '{anchor[:40]}...'")
 
-    CURRENT DRAFT: {state.cover_letter}
+    # This is triggered only if insertions create awkward transitions
+    needs_flow_fix = any(e.get("type") == "insert_after" for e in edits)
+    
+    if needs_flow_fix and len(edits) > 1:
+        #Fix transitions only, don't rewrite content
+        flow_prompt = f"""Fix ONLY the sentence transitions in this letter. Do not change content, metrics, or structure.
 
-    CRITIQUE: {state.critique_feedback}
+                    LETTER: {letter}
 
-    Return revised letter only. No commentary."""
-    response = llm.invoke(prompt)
+                    RULE: If transitions are already smooth, return the letter unchanged.
+                    Output the letter only, no commentary."""
+        
+        response = llm.invoke(flow_prompt)
+        letter = response.content.strip()
     
     return {
-        "cover_letter": response.content,
-        "refinement_count": current_count
+        "cover_letter": letter,
+        "refinement_count": state.refinement_count + 1,
+        "needs_refinement": False  # Stop after 1 iteration
     }
 
 def rewrite_query_node(state: GraphState, llm) -> dict:
@@ -719,4 +783,23 @@ def rewrite_query_node(state: GraphState, llm) -> dict:
     return {
         "cleaned_jd": response.content,
         "rewrite_count": state.rewrite_count + 1
+    }
+
+def join_context_node(state: GraphState) -> dict:
+    """This prevents race conditions between resume verification and company research."""
+
+    if not state.candidate_summary:
+        return{
+            "error_type": "incomplete_context",
+            "error_message": "Candidate summary missing."
+        }
+    
+    # Optional for Company Research
+
+    if not state.company_research:
+        state.company_research = "[No Company research available]"
+
+    return{
+        "candidate_summary" : state.candidate_summary,
+        "company_research" : state.company_research
     }
