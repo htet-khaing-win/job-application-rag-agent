@@ -717,3 +717,22 @@ def rewrite_query_node(state: GraphState, llm) -> dict:
         "cleaned_jd": response.content,
         "rewrite_count": state.rewrite_count + 1
     }
+
+def join_context_node(state: GraphState) -> dict:
+    """This prevents race conditions between resume verification and company research."""
+
+    if not state.candidate_summary:
+        return{
+            "error_type": "incomplete_context",
+            "error_message": "Candidate summary missing."
+        }
+    
+    # Optional for Company Research
+
+    if not state.company_research:
+        state.company_research = "[No Company research available]"
+
+    return{
+        "candidate_summary" : state.candidate_summary,
+        "company_research" : state.company_research
+    }
