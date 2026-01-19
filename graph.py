@@ -30,11 +30,17 @@ def should_refine_letter(state: GraphState) -> str:
     """
     If critique failed and under iteration limit, route to refinement.
     """
+    if not state.refinement_edits:
+        return END
+
+    # Already refined once
+    if state.refinement_count >= 1:
+        return END
+    
+    # Critique says ready
     if not state.needs_refinement:
         return END
     
-    if state.refinement_count >= 3:
-        return END
     return "refine_letter"
 
 def should_proceed_with_retrieval(state: GraphState) -> str:
