@@ -32,7 +32,7 @@ load_dotenv()
 generator_llm = ChatOllama(
     model="mistral:7b-instruct",
     temperature=0.7, # To be creative
-    num_ctx=4096,
+    num_ctx=8192,
     num_gpu=35,
 )
 
@@ -118,7 +118,16 @@ def main():
     try:
 
         print("\n Analyzing job description...")
-        result = app.invoke(initial_state)
+        result = app.invoke(
+            initial_state, config = {
+                "run_name": "job_application_run",
+                "tags": ["langgraph", "async", "cover-letter"],
+                "metadata": {
+                    "company": company_input,
+                    "has_research": bool(company_input),
+                }
+            }
+        )
 
         # Check if fallback was triggered
         if result.get("is_fallback", False):
