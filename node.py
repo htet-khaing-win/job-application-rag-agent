@@ -51,14 +51,13 @@ def ingest_jd_node(state: GraphState, llm) -> dict:
     }
 
 
-def research_company_node(state: GraphState, llm) -> dict:
+def research_company_node(state: GraphState) -> dict:
     """
     Uses Tavily AI to fetch real-time company information. This runs AFTER user confirms the company name.
     
     Purpose:
         - Fetches company mission, values, recent news
         - Provides grounding for personalized cover letter opening
-        - Reduces generic "I'm excited about [Company]" statements
     """
     
     company_name = state.company_name
@@ -70,28 +69,26 @@ def research_company_node(state: GraphState, llm) -> dict:
         search_results = tavily_client.search(
             query=search_query,
             search_depth="advanced",
-            max_results=5
+            max_results=3
         )
         
         # Extract relevant information
-        research_text = f"Company: {company_name}\n\n"
+        research_snippets = []
         
         for result in search_results.get('results', []):
-            research_text += f"Source: {result.get('title', 'N/A')}\n"
-            research_text += f"{result.get('content', '')}\n\n"
+            title = result.get('title', 'N/A')
+            content = result.get('content', '')[:300]  # Truncate to 300 chars per source
+            
+            if content:
+                research_snippets.append(f"• {title}: {content}")
         
-        # Use LLM to synthesize research into usable summary
-        synthesis_prompt = f"""Synthesize into 100-150 words:
-        - Company Overview: 2-3 mission/values
-        - Recent Developments: 1-2 items from past 6mo
-        - Culture Insights: unique aspects
-
-        {research_text}"""
-        
-        synthesis_response = llm.invoke(synthesis_prompt)
+        if research_snippets:
+            company_research = f"Company: {company_name}\n\n" + "\n\n".join(research_snippets)
+        else:
+            company_research = f"Company: {company_name} (limited public information available)"
         
         return {
-            "company_research": synthesis_response.content,
+            "company_research": company_research,
             "company_research_success": True
         }
         
