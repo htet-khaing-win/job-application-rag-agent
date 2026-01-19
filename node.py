@@ -6,6 +6,7 @@ from state import GraphState
 import json
 import re
 from tavily import TavilyClient
+import asyncio
 
 load_dotenv()
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
@@ -51,7 +52,7 @@ def ingest_jd_node(state: GraphState, llm) -> dict:
     }
 
 
-def research_company_node(state: GraphState) -> dict:
+async def research_company_node(state: GraphState) -> dict:
     """
     Uses Tavily AI to fetch real-time company information. This runs AFTER user confirms the company name.
     
@@ -66,10 +67,12 @@ def research_company_node(state: GraphState) -> dict:
         # Tavily search query
         search_query = f"{company_name} company mission values recent news 2024 2025"
         
-        search_results = tavily_client.search(
+        search_results = await asyncio.to_thread(
+            tavily_client.search(
             query=search_query,
             search_depth="advanced",
             max_results=3
+        )
         )
         
         # Extract relevant information
