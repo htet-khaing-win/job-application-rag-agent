@@ -13,6 +13,8 @@ from privacy import PIIGuard
 import sys
 from pinecone_text.sparse import BM25Encoder
 import re
+import asyncio
+from langsmith import traceable
 
 load_dotenv()
 pii_guard = PIIGuard()
@@ -301,8 +303,8 @@ def validate_resume_file(file_path):
     
     return True, "Completed"
 
-
-def retrieve_resumes_node(state: GraphState, llm) -> dict:
+@traceable(run_type="tool", name="pinecone_retrieval")
+async def retrieve_resumes_node(state: GraphState, llm) -> dict:
     """
     The Researcher - Queries Pinecone vector database for relevant resume chunks.
     
@@ -315,8 +317,8 @@ def retrieve_resumes_node(state: GraphState, llm) -> dict:
     Output: state.retrieved_chunks - List of resume text chunks with scores
     
     """
-    dense_query = embeddings.embed_query(state.cleaned_jd)
-    sparse_query = bm25.encode_queries(state.cleaned_jd)
+    dense_query = await asyncio.to_thread(embeddings.embed_query(state.cleaned_jd))
+    sparse_query = await asyncio.to_thread(bm25.encode_queries(state.cleaned_jd))
     all_matches = []
     resume_list = list_stored_resumes()
 
