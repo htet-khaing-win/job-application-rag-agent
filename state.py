@@ -28,3 +28,5 @@ class GraphState(BaseModel):
     verified_skills: List[str] = Field(default_factory=list)  # Simple list for compatibility
     unverified_skills: List[str] = Field(default_factory=list)
     verified_skills_detailed: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict) 
+    refinement_edits: List[Dict[str, str]] = Field(default_factory=list)  # NEW
+    refinement_count: int = 0
