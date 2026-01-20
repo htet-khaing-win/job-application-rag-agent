@@ -343,7 +343,13 @@ async def retrieve_resumes_node(state: GraphState, llm) -> dict:
         )
 
     # Cross-namespace search
-    for names in resume_list:
+    MAX_RESUMES = 2
+    capped_list = resume_list[:MAX_RESUMES]
+
+    if len(resume_list) > MAX_RESUMES:
+        print(f" Processing top {MAX_RESUMES} of {len(resume_list)} resumes")
+
+    for names in capped_list:
         try:
             resume = await asyncio.to_thread(query_namespace, names)
             all_matches.extend(resume['matches'])
