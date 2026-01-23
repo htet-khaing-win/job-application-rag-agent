@@ -22,13 +22,18 @@ pii_guard = PIIGuard()
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 BM25_PATH = "utilities/fitted_bm25.json"
 
-if os.path.exists(BM25_PATH):
-    print(f" Loading custom fitted BM25 from {BM25_PATH}")
-    bm25 = BM25Encoder()
-    bm25.load(BM25_PATH)
-else:
-    print(" WARNING: No fitted BM25 found. Using default (cold) encoder.")
-    bm25 = BM25Encoder.default()
+_bm25 = None
+_index = None
+
+def get_bm25():
+    global _bm25
+    if _bm25 is None:
+        if os.path.exists(BM25_PATH):
+            _bm25 = BM25Encoder()
+            _bm25.load(BM25_PATH)
+        else:
+            _bm25 = BM25Encoder.default()
+    return _bm25
 
 SECTION_PATTERNS = {
     "EXPERIENCE": r"(WORK EXPERIENCE|PROFESSIONAL EXPERIENCE|EMPLOYMENT|CAREER HISTORY)",
@@ -107,16 +112,21 @@ def get_index(index_name: str, dimension: int = 768):
         print(f" Connected to existing index: {index_name}")
     return pc.Index(index_name)
 
-index = get_index(index_name="resume-index", dimension=768)
+def get_pinecone_index():
+    global _index
+    if _index is None:
+        # We hardcode the config here, or load it from env vars
+        _index = get_index(index_name="resume-index", dimension=768)
+    return _index
 
-embeddings = GoogleGenerativeAIEmbeddings(
-    model="models/text-embedding-004",
-    google_api_key=os.getenv("GEMINI_API_KEY") 
-)
-
-# embeddings = OllamaEmbeddings(
-#     model="nomic-embed-text" 
+# embeddings = GoogleGenerativeAIEmbeddings(
+#     model="models/text-embedding-004",
+#     google_api_key=os.getenv("GEMINI_API_KEY") 
 # )
+
+embeddings = OllamaEmbeddings(
+    model="nomic-embed-text" 
+)
 
 # Helpers
 def parse_pdf(file_path):
@@ -364,7 +374,7 @@ async def retrieve_resumes_node(state: GraphState, llm) -> dict:
 
     # Aggregation per Resume (Diversity)
     sorted_matches = sorted(all_matches, key=lambda x: x['score'], reverse=True)
-    final_matches = sorted_matches[:11]
+    final_matches = sorted_matches[:10]
 
     if not final_matches:
         print(" No matches passed the relevance threshold.")
