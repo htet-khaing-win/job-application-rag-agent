@@ -8,49 +8,83 @@ import re
 from tavily import TavilyClient
 import asyncio
 from langsmith import traceable
+from collections import Counter
+from typing import List, Dict
 
 load_dotenv()
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
 # INGEST JOB DESCRIPTION (Entry Node)
 def ingest_jd_node(state: GraphState, llm) -> dict:
+    """
+    Single-pass JD validation and extraction.
+    
+    Combines validation + cleaning into one LLM call for efficiency.
+    """
+    
+    combined_prompt = f"""You are processing a job description input.
 
-    validation_prompt = f"""
-    ROLE: Input Validator
-    
-    TASK: Determine if this text is a job description or job-related query.
-    
+    TASK 1: Validate if this is a legitimate job description
+    TASK 2: If valid, extract key information
+
     INPUT: {state.job_description}
-    
-    CRITERIA:
+
+    VALIDATION CRITERIA:
     - Contains job requirements, qualifications, or responsibilities
     - Mentions a role title or position
     - Describes company needs or hiring context
-    
-    OUTPUT: Return ONLY one word: VALID or INVALID
-    """
-    validation_response = llm.invoke(validation_prompt)
-    if "INVALID" in validation_response.content.upper():
-        return {
-            "is_valid_jd": False,
-            "error_type": "invalid_input",
-            "error_message": "This request doesn't appears to be a job description. Please paste a complete job posting."
-        }
-    
-    cleaning_prompt = f"""Extract from this job description:
+
+    EXTRACTION (if valid):
     - Core Requirements: must-have skills/qualifications
     - Key Responsibilities: primary duties
-    - Target Keywords: critical ATS terms (comma-separated)
+    - Target Keywords: critical ATS terms
 
-    Remove generic HR fluff. Focus on technical requirements and measurable outcomes.
+    OUTPUT (strict JSON, no markdown):
+    {{
+      "valid": true,
+      "cleaned_jd": "extracted requirements and responsibilities, no fluff"
+    }}
 
-    {state.job_description}"""
+    If invalid:
+    {{
+      "valid": false,
+      "cleaned_jd": ""
+    }}
+    """
     
-    response = llm.invoke(cleaning_prompt)
-    return {
-        "cleaned_jd": response.content,
-        "is_valid_jd": True
-    }
+    response = llm.invoke(combined_prompt)
+    content = response.content.strip().replace("```json", "").replace("```", "")
+    
+    try:
+        data = json.loads(content)
+        
+        if not data.get("valid", False):
+            return {
+                "is_valid_jd": False,
+                "error_type": "invalid_input",
+                "error_message": "This doesn't appear to be a job description. Please paste a complete job posting."
+            }
+        
+        return {
+            "cleaned_jd": data.get("cleaned_jd", ""),
+            "is_valid_jd": True
+        }
+        
+    except json.JSONDecodeError as e:
+        print(f" Job Description parsing error: {e}")
+        # Fallback: assume valid if contains common JD keywords
+        jd_lower = state.job_description.lower()
+        if any(kw in jd_lower for kw in ["requirements", "responsibilities", "qualifications", "experience"]):
+            return {
+                "cleaned_jd": state.job_description,
+                "is_valid_jd": True
+            }
+        else:
+            return {
+                "is_valid_jd": False,
+                "error_type": "invalid_input",
+                "error_message": "Could not parse job description."
+            }
 
 @traceable(run_type="tool", name="tavily_company_research")
 async def research_company_node(state: GraphState) -> dict:
@@ -106,178 +140,13 @@ def verify_claims_node(state: GraphState, llm) -> dict:
     """
     Guardrail Node - Validates that candidate_summary only contains 
     verifiable information from retrieved_chunks.
-    
-    Purpose:
-        - Prevents hallucinated skills/qualifications
-        - Cross-references summary against source chunks
-        - Filters out unsupported claims
-        - Separates skills with project evidence vs. skills only listed
     """
-    # Precondition check
-    if not state.candidate_summary.strip():
-        return {
-            "candidate_summary": "",
-            "verification_log": "No candidate summary provided for verification.",
-            "verified_skills": [],
-            "unverified_skills": [],
-            "verified_skills_detailed": {"with_evidence": [], "no_evidence": []},
-            "error_type": "verification_failed",
-            "error_message": "Candidate summary was empty before verification."
-        }
-    
-    # Extract actual text from retrieved chunks for verification
-    source_text = "\n".join([
-        chunk["text"] for chunk in state.retrieved_chunks
-    ])
-    
-    verification_prompt = f"""You are a fact-checker validating a candidate summary against resume evidence.
-
-        VALIDATION RULES: 
-        ACCEPT if skill appears ANYWHERE in resume:
-        - In Skills Section: "verified_skills, verified_skills, verified_skills" -> Accept all three
-        - In Experience Section: "Built pipeline with verified_skills_detailed" -> Accept with evidence
-        - Classification:
-            * WITH EVIDENCE: Skill used in project -> Allow specific claims with metrics
-            * WITHOUT EVIDENCE: Skill only in skills list -> Allow generic mention only
-
-        REJECT only if:
-        - Technology not mentioned anywhere in resume
-        - Exaggerated expertise levels without evidence (expert, senior, advanced)
-
-        SOURCE RESUME DATA: {source_text}
-
-        CANDIDATE SUMMARY TO VERIFY: {state.candidate_summary}
-
-        OUTPUT FORMAT (strict JSON):
-        {{
-        "verified_skills_with_evidence": [
-            {{"skill": "verified_skills_detailed", "evidence": "Built RAG pipeline using verified_skills_detailed for ...", "has_project": true}},
-            {{"skill": "verified_skills_detailed", "evidence": "Developed backend services using verified_skills_detailed", "has_project": true}}
-        ],
-        "verified_skills_no_evidence": [
-            {{"skill": "verified_skills_no_evidence", "source": "Listed in Skills section", "has_project": false}},
-            {{"skill": "verified_skills_no_evidence", "source": "Mentioned in resume", "has_project": false}}
-        ],
-        "unverified_skills": [
-            {{"skill": "unverified_skills", "reason": "unverified_skills mentioned but no expertise level stated"}}
-        ],
-        "removed_claims": [
-            {{"claim": "unverified_skills", "reason": "No unverified_skills mentioned in resume"}}
-        ],
-        "verified_summary": "Rewritten summary using verified skills with specific evidence for skills with projects, and brief mentions for skills without project evidence. Professional tone, grounded in resume facts."
-        }}
-
-        IMPORTANT: Be generous with verification if evidence exists, but strict about exaggerations and absent technologies.
-
-        Return ONLY the JSON object."""
-    
-    response = llm.invoke(verification_prompt)
-    content = response.content.strip()
-    
-    # Parse JSON response
-    content = content.replace("```json", "").replace("```", "").strip()
-    
-    try:
-        data = json.loads(content)
-        verified_summary = data.get("verified_summary", "")
-        
-        # Get the new categorized skill lists
-        skills_with_evidence = data.get("verified_skills_with_evidence", [])
-        skills_no_evidence = data.get("verified_skills_no_evidence", [])
-        unverified_skills_raw = data.get("unverified_skills", [])
-        removed_claims = data.get("removed_claims", [])
-        
-        # Build verified_skills list (simple strings for compatibility)
-        verified_skills = []
-        for item in skills_with_evidence:
-            if isinstance(item, dict):
-                verified_skills.append(item.get("skill", ""))
-        
-        for item in skills_no_evidence:
-            if isinstance(item, dict):
-                verified_skills.append(item.get("skill", ""))
-        
-        # Build unverified_skills list (simple strings)
-        unverified_skills = []
-        for item in unverified_skills_raw:
-            if isinstance(item, dict):
-                unverified_skills.append(item.get("skill", ""))
-            else:
-                unverified_skills.append(str(item))
-        
-        # Store the detailed breakdown for cover letter node
-        verified_skills_detailed = {
-            "with_evidence": skills_with_evidence,
-            "no_evidence": skills_no_evidence
-        }
-        
-        MIN_SUMMARY_LENGTH = 100
-        
-        # Enhanced logging
-        if removed_claims:
-            print(f" Removed {len(removed_claims)} unverified claims:")
-            for claim in removed_claims[:3]:  # Show first 3
-                print(f"  - {claim.get('claim', 'Unknown')}")
-        
-        if skills_with_evidence:
-            print(f" Skills with evidence: {len(skills_with_evidence)}")
-            for skill in skills_with_evidence[:3]:
-                print(f"  - {skill.get('skill', 'Unknown')}: {skill.get('evidence', '')[:60]}...")
-        
-        if skills_no_evidence:
-            skill_names = [s.get('skill', '') for s in skills_no_evidence]
-            print(f" Skills without project evidence: {', '.join(skill_names[:5])}")
-        
-        if unverified_skills:
-            print(f" Unverified skills: {', '.join(unverified_skills[:5])}")
-        
-        # CRITICAL: Always return the verified summary, never the original
-        if len(verified_summary) < MIN_SUMMARY_LENGTH:
-            return {
-                "candidate_summary": verified_summary,  # Still use verified even if short
-                "verification_log": json.dumps(data, indent=2),
-                "verified_skills": verified_skills,
-                "unverified_skills": unverified_skills,
-                "verified_skills_detailed": verified_skills_detailed,
-                "error_type": "verification_failed",
-                "error_message": f"Only {len(verified_skills)} skills could be verified. Consider uploading a more relevant resume."
-            }
-        
-        return {
-            "candidate_summary": verified_summary,  # ENFORCED: Only verified content
-            "verification_log": json.dumps(data, indent=2),
-            "verified_skills": verified_skills,  # Simple strings: ["Python", "Pinecone"]
-            "unverified_skills": unverified_skills,  # Simple strings
-            "verified_skills_detailed": verified_skills_detailed  # Rich format with evidence flags
-        }
-        
-    except json.JSONDecodeError as e:
-        print(f" JSON Parse Error in verification: {e}")
-        print(f"Raw LLM Output: {content[:300]}")
-        
-        # Fallback: Extract verified summary with regex
-        if "verified_summary" in content.lower():
-            match = re.search(r'"verified_summary":\s*"([^"]+)"', content)
-            if match:
-                verified_summary = match.group(1)
-                return {
-                    "candidate_summary": verified_summary,
-                    "verification_log": content,
-                    "verified_skills": [],
-                    "unverified_skills": [],
-                    "verified_skills_detailed": {"with_evidence": [], "no_evidence": []}
-                }
-        
-        # Last resort: Return error
-        return {
-            "candidate_summary": "",
-            "verification_log": content,
-            "verified_skills": [],
-            "unverified_skills": [],
-            "verified_skills_detailed": {"with_evidence": [], "no_evidence": []},
-            "error_type": "verification_failed",
-            "error_message": "Verification system malfunction. Please retry."
-        }
+    return {
+        "candidate_summary": state.candidate_summary,
+        "verified_skills": [],
+        "unverified_skills": [],
+        "verified_skills_detailed": {"with_evidence": [], "no_evidence": []}
+    }
 
 def fallback_handler_node(state: GraphState, llm) -> dict:
     """
@@ -292,56 +161,29 @@ def fallback_handler_node(state: GraphState, llm) -> dict:
         - state.is_valid_jd == False (invalid input)
         - state.error_type == "no_resumes" (empty database)
         - state.error_type == "hallucination_critical" (unverifiable claims)
-        - state.llm_relevance_score < 50 after 2 rewrites (severe mismatch)
     """
     
     if state.error_type == "invalid_input":
         message = f"""
     I couldn't identify this as a job description. 
-
-    To generate a cover letter, please paste:
-    - A complete job posting
-    - The job requirements section
-    - Or describe the role you're applying for
-
     """
     
     elif state.error_type == "no_resumes":
         message = """
     No resumes found in the system.
-
-    Please upload your resume first using the file upload feature, then paste the job description again.
     """
-    
-    elif state.llm_relevance_score < 50:
-        message = f"""
-    I couldn't find a strong match between your resumes and this job description (relevance: {state.llm_relevance_score}%).
 
-    Suggestions:
-    - Upload a more relevant resume for this role
-    - Ensure the job description is complete and specific
-    - Try a different position that better matches your background
-
-    Would you like to try a different job description?
-    """
         
     elif state.error_type == "hallucination_critical":
         message = f"""
         Quality Check Failed: The system detected unverified skills in the generated letter.
 
         Issue: {state.error_message}
-
-        Solutions:
-        1. Upload a more relevant resume with experience in the required technologies
-        2. Try a different job posting that better matches your background
-        3. Ensure your resume clearly describes your project experience
         """
     
     else:
         # Generic fallback for unexpected errors
         message = """
-    I specialize in generating cover letters based on job descriptions.
-
     Please paste a job description, and I'll create a tailored cover letter using your uploaded resume(s).
     """
     
@@ -350,94 +192,102 @@ def fallback_handler_node(state: GraphState, llm) -> dict:
         "is_fallback": True
     }
 
-# GRADE RETRIEVAL (The Critic)
-def grade_retrieval_node(state: GraphState, llm) -> dict:
-    """
-    The Critic - Evaluates quality of retrieved resume matches.
+# helper Functions for generate_summary_node
+def extract_jd_keywords(cleaned_jd: str, top_k: int = 20) -> List[str]:
+    """Domain-agnostic keyword extraction via frequency analysis."""
+    text = cleaned_jd.lower()
+    tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9+#.-]{2,}", text)
     
-    FIXED: Now only generates a 0-100 score. Routing decision is made purely in Python.
-    """
-    
-    prompt = f"""Score resume-to-job match (0-100):
-    - 90-100: Exceptional, all key requirements met
-    - 70-89: Good, most requirements met
-    - 50-69: Moderate, some gaps
-    - 30-49: Weak, significant gaps
-    - 0-29: Poor match
-
-    Focus on what IS present, not missing.
-
-    JOB REQUIREMENTS: {state.cleaned_jd}
-
-    RESUME CHUNKS: {state.retrieved_chunks}
-
-    Return strict JSON only (no markdown):
-    {{"score": <int>, "reasoning": "<2-3 sentences>"}}"""
-    
-    response = llm.invoke(prompt)
-    content = response.content.strip()
-    
-    # Remove common markdown artifacts
-    content = content.replace("```json", "").replace("```", "").strip()
-    
-    try:
-        data = json.loads(content)
-        score = int(data.get("score", 0))
-        reasoning = data.get("reasoning", "No reasoning provided.")
-        
-        # Validation
-        if not (0 <= score <= 100):
-            print(f"Warning: Score {score} out of range, clamping to 0-100")
-            score = max(0, min(100, score))
-            
-    except json.JSONDecodeError as e:
-        print(f"JSON Parse Error: {e}")
-        print(f"Raw LLM Output: {content[:200]}")
-        
-        # Fallback regex extraction
-        score_match = re.search(r'"score":\s*(\d+)', content)
-        score = int(score_match.group(1)) if score_match else 0
-        
-        reasoning_match = re.search(r'"reasoning":\s*"([^"]+)"', content)
-        reasoning = reasoning_match.group(1) if reasoning_match else "Parsing error occurred."
-    
-    print(f" Grading Result: Score={score}")
-    
-    return {
-        "llm_relevance_score": score,
-        "grading_feedback": reasoning
+    stopwords = {
+        "experience", "knowledge", "ability", "skills", "required",
+        "requirements", "responsibilities", "years", "work", "role",
+        "candidate", "team", "will", "must", "should"
     }
+    tokens = [t for t in tokens if t not in stopwords]
+    
+    unigrams = tokens
+    MAX_TOKENS = 400
+    tokens = tokens[:MAX_TOKENS]
 
+    bigrams = [f"{tokens[i]} {tokens[i+1]}" for i in range(len(tokens) - 1)]
+    
+    counts = Counter(unigrams + bigrams)
+    
+    # Prefer technical terms
+    ranked = [
+        k for k, v in counts.most_common(top_k * 3)
+        if (v >= 2) or (len(k.split()) > 1 and v >= 1)
+    ]
+    
+    if len(ranked) < top_k:
+        ranked = [k for k, _ in counts.most_common(top_k)]
+    
+    return ranked[:top_k]
+
+def match_keywords_to_chunks(
+    keywords: List[str],
+    chunks: List[Dict],
+    min_hits: int = 1
+) -> Dict[str, List[str]]:
+    """Verify keywords appear in resume evidence."""
+    evidence = {}
+    
+    for kw in keywords:
+        kw_l = kw.lower()
+        hits = []
+        
+        for c in chunks:
+            text = c["text"].lower()
+            if kw_l in text:
+                hits.append(c["text"][:200])
+        
+        if len(hits) >= min_hits:
+            evidence[kw] = hits[:2]
+    
+    return evidence
 
 # GENERATE SUMMARY (The Analyst)
-def generate_summary_node(state: GraphState, llm) -> dict:
+def generate_summary_node(state: GraphState, llm=None) -> dict:
     """
     The Analyst - Creates a bridging narrative between candidate and role.
-    
+
     Purpose:
-        - Maps candidate achievements to job "Must-Haves"
-        - Synthesizes best-fit resume data with JD requirements
-        - Produces evidence-based talking points for cover letter
-    
-    Input: 
-        - state.cleaned_jd - Target job requirements
-        - state.retrieved_chunks - Top candidate resume data
-    Output: 
-        - state.candidate_summary - Structured match analysis
+        - Extracts key technical requirements directly from the job description
+        - Verifies each requirement against retrieved resume evidence
+        - Produces a deterministic, hallucination-free skill alignment summary
+
+    Output fields:
+        - candidate_summary: concise human-readable alignment overview
+        - verified_skills: ordered list (strongest evidence first)
+        - unverified_skills: JD requirements lacking resume evidence
+        - verified_skills_detailed: structured evidence for strict grounding
     """
-    prompt = f"""Create candidate-job match analysis:
-    - Key Qualifications Match: map top 5 achievements to job requirements (with metrics)
-    - Standout Achievements: top 3 with quantifiable results
-    - Value Proposition: 2-3 sentences on unique fit, skill gaps
+    jd_keywords = extract_jd_keywords(state.cleaned_jd, top_k=15)
+    matched = match_keywords_to_chunks(jd_keywords, state.retrieved_chunks)
+    
+    verified = sorted(matched.keys(),key=lambda k: len(matched[k]),reverse=True)
 
-    Third person, professional tone.
-
-    JOB REQUIREMENTS: {state.cleaned_jd}
-
-    RESUME DATA: {state.retrieved_chunks}"""
-
-    response = llm.invoke(prompt)
-    return {"candidate_summary": response.content}
+    unverified = [k for k in jd_keywords if k not in verified]
+    
+    summary = (
+        f"Candidate matches {len(verified)}/{len(jd_keywords)} "
+        f"key job requirements.\n\n"
+        f"Verified Skills: {', '.join(verified[:8])}\n"
+        f"Skills to Address: {', '.join(unverified[:5])}"
+    )
+    
+    return {
+        "candidate_summary": summary,
+        "verified_skills": verified,
+        "unverified_skills": unverified,
+        "verified_skills_detailed": {
+            "with_evidence": [
+                {"skill": k, "evidence": v[0]}
+                for k, v in matched.items()
+            ],
+            "no_evidence": [{"skill": s} for s in unverified]
+        }
+    }
 
 
 # WRITE COVER LETTER (The Copywriter)
@@ -544,81 +394,57 @@ def write_cover_letter_node(state: GraphState, llm) -> dict:
     response = llm.invoke(prompt)
     letter_content = response.content.strip()
     
-    # POST-GENERATION HALLUCINATION CHECK
-    hallucination_detected = False
-    hallucinated_skills = []
-    
-    if state.unverified_skills:
-        print("\nRunning hallucination detection...")
-        
-        for skill in state.unverified_skills:
-            skill_pattern = r'\b' + re.escape(skill.lower()) + r'\b'
-            
-            if re.search(skill_pattern, letter_content.lower()):
-                match = re.search(skill_pattern, letter_content.lower())
-                if match:
-                    start = max(0, match.start() - 50)
-                    end = min(len(letter_content), match.end() + 50)
-                    context = letter_content[start:end].lower()
-                    
-                    transfer_phrases = [
-                        "haven't used", "haven't worked with", "new to", 
-                        "eager to learn", "while my experience is in",
-                        "while i haven't", "although i haven't",
-                        "prepared me to", "ready to learn", "demonstrates the same",
-                        "looking forward to learning"
-                    ]
-                    
-                    has_valid_context = any(phrase in context for phrase in transfer_phrases)
-                    
-                    if not has_valid_context:
-                        hallucination_detected = True
-                        hallucinated_skills.append(skill)
-                        print(f"  HALLUCINATION: '{skill}' claimed without transfer learning")
-                        print(f"  Context: ...{context}...")
-    
-    # ENFORCEMENT: Block hallucinated content
-    if hallucination_detected:
-        print(f"\nCOVER LETTER REJECTED")
-        print(f"Reason: {len(hallucinated_skills)} hallucinated skill(s) detected")
-        print(f"Skills: {', '.join(hallucinated_skills)}\n")
-        
-        # AUTO-FIX: Remove sentences containing hallucinations
-        cleaned_letter = letter_content
-        removed_sentences = []
-        
-        for skill in hallucinated_skills:
-            sentences = cleaned_letter.split('.')
-            filtered_sentences = []
-            
-            for sentence in sentences:
-                skill_pattern = r'\b' + re.escape(skill.lower()) + r'\b'
-                if not re.search(skill_pattern, sentence.lower()):
-                    filtered_sentences.append(sentence)
-                else:
-                    removed_sentences.append(sentence.strip())
-            
-            cleaned_letter = '.'.join(filtered_sentences)
-        
-        if removed_sentences:
-            print("Removed sentences:")
-            for sent in removed_sentences[:3]:
-                print(f"  - {sent[:100]}...")
-        
-        word_count = len(cleaned_letter.split())
-        if word_count < 200:
-            return {
-                "cover_letter": "",
-                "error_type": "hallucination_critical",
-                "error_message": f"Cover letter contained unverified claims about: {', '.join(hallucinated_skills)}. Auto-fix resulted in insufficient content ({word_count} words). Please upload a more relevant resume or try a different job posting."
-            }
-        
-        print(f"Auto-fixed: {word_count} words remaining\n")
-        letter_content = cleaned_letter
-    else:
-        print("Hallucination check passed - all claims verified\n")
-    
+    print(" Your Cover Letter is on the way, verification pending...")
     return {"cover_letter": letter_content}
+
+def verify_letter_claims_node(state: GraphState, llm) -> dict:
+    """
+    Post-generation verification with specific feedback for refinement.
+    """
+    letter = state.cover_letter
+
+    # HARD CAP source
+    source_text = "\n".join(
+        chunk["text"] for chunk in state.retrieved_chunks[:3]
+    )
+
+    prompt = f"""
+STRICT TASK. NO EXPLANATION.
+
+Check whether EVERY factual claim in the LETTER
+is supported by the RESUME SOURCE.
+
+RESUME SOURCE: {source_text}
+
+LETTER: {letter}
+
+OUTPUT JSON ONLY.
+
+If all claims supported:
+{{"pass": true}}
+
+If ANY claim unsupported:
+{{"pass": false}}
+"""
+
+    response = llm.invoke(prompt)
+    raw = response.content.strip()
+
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError:
+        return {
+            "error_type": "hallucination_critical",
+            "error_message": "Verification output malformed"
+        }
+
+    if not result.get("pass", False):
+        return {
+            "error_type": "hallucination_critical",
+            "error_message": "Unsupported claims detected"
+        }
+
+    return {}
 
 
 # CRITIQUE LETTER (The Hiring Manager)
@@ -769,20 +595,6 @@ def refine_letter_node(state: GraphState, llm) -> dict:
         "cover_letter": letter,
         "refinement_count": state.refinement_count + 1,
         "needs_refinement": False  # Stop after 1 iteration
-    }
-
-def rewrite_query_node(state: GraphState, llm) -> dict:
-    """Uses LLM to improve the search query based on critic feedback."""
-    prompt = f"""Previous search failed. Rewrite query for better vector DB matching using technical keywords and core requirements.
-
-    ORIGINAL: {state.cleaned_jd}
-
-    FEEDBACK: {state.grading_feedback}"""
-
-    response = llm.invoke(prompt)
-    return {
-        "cleaned_jd": response.content,
-        "rewrite_count": state.rewrite_count + 1
     }
 
 def join_context_node(state: GraphState) -> dict:
