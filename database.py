@@ -24,6 +24,7 @@ BM25_PATH = "utilities/fitted_bm25.json"
 
 _bm25 = None
 _index = None
+_embeddings = None
 
 def get_bm25():
     global _bm25
@@ -34,6 +35,16 @@ def get_bm25():
         else:
             _bm25 = BM25Encoder.default()
     return _bm25
+
+def get_embeddings():
+    global _embeddings
+    if _embeddings is None:
+        # _embeddings = OllamaEmbeddings(model="nomic-embed-text")
+        _embeddings = GoogleGenerativeAIEmbeddings(
+                    model="models/text-embedding-004",
+                    google_api_key=os.getenv("GEMINI_API_KEY")
+                        )
+    return _embeddings
 
 SECTION_PATTERNS = {
     "EXPERIENCE": r"(WORK EXPERIENCE|PROFESSIONAL EXPERIENCE|EMPLOYMENT|CAREER HISTORY)",
@@ -119,14 +130,6 @@ def get_pinecone_index():
         _index = get_index(index_name="resume-index", dimension=768)
     return _index
 
-# embeddings = GoogleGenerativeAIEmbeddings(
-#     model="models/text-embedding-004",
-#     google_api_key=os.getenv("GEMINI_API_KEY") 
-# )
-
-embeddings = OllamaEmbeddings(
-    model="nomic-embed-text" 
-)
 
 # Helpers
 def parse_pdf(file_path):
@@ -182,7 +185,9 @@ def ingest_resume_to_pinecone(file_path):
     Side Effects: 
         - Updates the Pinecone 'resume-index' with new vector entries.
     """
-
+    bm25 = get_bm25()
+    index = get_pinecone_index()
+    embeddings = get_embeddings()
     filename = os.path.basename(file_path)
     ext = os.path.splitext(file_path)[-1].lower()
 
@@ -216,7 +221,7 @@ def ingest_resume_to_pinecone(file_path):
 
     # Chunking
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=600,
+        chunk_size=750,
         chunk_overlap=50,
         separators=["\n\n", "\n", ". ", ", ", " ", ""]
     )
@@ -280,6 +285,7 @@ def list_stored_resumes():
     Returns:
         List[str]: A sorted list of unique filenames found in metadata.
     """
+    index = get_pinecone_index()
     stats = index.describe_index_stats()
     namespaces = stats.get('namespaces', {})
     return sorted(list(namespaces.keys()))
@@ -289,8 +295,9 @@ def delete_resume_from_pinecone(filename: str):
     """
     Deletes all vector chunks associated with a specific filename.
     """
+    index = get_pinecone_index()  # Get lazy-loaded instance
     try:
-        index.delete(delete_all = True, namespace = filename)
+        index.delete(delete_all=True, namespace=filename)
         print(f"Deleted all chunks for {filename}")
         return True
     except Exception as e:
@@ -314,7 +321,7 @@ def validate_resume_file(file_path):
     return True, "Completed"
 
 @traceable(run_type="tool", name="pinecone_retrieval")
-async def retrieve_resumes_node(state: GraphState, llm) -> dict:
+async def retrieve_resumes_node(state: GraphState) -> dict:
     """
     The Researcher - Queries Pinecone vector database for relevant resume chunks.
     
@@ -327,10 +334,19 @@ async def retrieve_resumes_node(state: GraphState, llm) -> dict:
     Output: state.retrieved_chunks - List of resume text chunks with scores
     
     """
-    dense_query = await asyncio.to_thread(embeddings.embed_query, state.cleaned_jd)
-    sparse_query = await asyncio.to_thread(bm25.encode_queries, state.cleaned_jd)
-    all_matches = []
-    resume_list = list_stored_resumes()
+
+    # Initialize lazy-loaded resources
+    embeddings = get_embeddings()
+    bm25 = get_bm25()
+    index = get_pinecone_index()
+
+    # Parallelize embedding generation
+    dense_query, sparse_query, resume_list = await asyncio.gather(
+        asyncio.to_thread(embeddings.embed_query, state.cleaned_jd),
+        asyncio.to_thread(bm25.encode_queries, state.cleaned_jd),
+        asyncio.to_thread(list_stored_resumes)
+    )
+
 
     if not resume_list:
         print(" No resumes found in database.")
@@ -340,31 +356,32 @@ async def retrieve_resumes_node(state: GraphState, llm) -> dict:
             "grading_feedback": "Database is empty. Please upload resumes first.",
             "vector_relevance_score": 0.0
         }
-    
+
+    capped_list = resume_list[:2]
     # Helper function for Pinecone query
-    def query_namespace(namespace):
-        return index.query(
+    async def query_namespace(namespace):
+        return await asyncio.to_thread(
+            index.query,
             vector=dense_query,
-            sparse_vector=sparse_query, 
+            sparse_vector=sparse_query,
             top_k=10,
             include_metadata=True,
             alpha=0.4,
             namespace=namespace
         )
-
-    # Cross-namespace search
-    MAX_RESUMES = 2
-    capped_list = resume_list[:MAX_RESUMES]
-
-    if len(resume_list) > MAX_RESUMES:
-        print(f" Processing top {MAX_RESUMES} of {len(resume_list)} resumes")
-
-    for names in capped_list:
-        try:
-            resume = await asyncio.to_thread(query_namespace, names)
-            all_matches.extend(resume['matches'])
-        except Exception as e:
-            print(f"Error querying namespace {names}: {str(e)}")
+    
+    # Gather all queries in parallel
+    results = await asyncio.gather(
+        *[query_namespace(ns) for ns in capped_list],
+        return_exceptions=True
+    )
+    
+    all_matches = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            print(f"Error querying namespace {capped_list[i]}: {result}")
+        else:
+            all_matches.extend(result.get('matches', []))
 
     if not all_matches:
         return {
