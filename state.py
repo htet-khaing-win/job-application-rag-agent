@@ -1,5 +1,6 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Annotated
 from pydantic import BaseModel, Field
+from operator import or_
 
 class GraphState(BaseModel):
     job_description: str
@@ -12,21 +13,21 @@ class GraphState(BaseModel):
     critique_feedback: str = ""
     needs_rewrite: bool = False
     grading_feedback: str = ""
-    needs_refinement: bool = False
-    refinement_count: int = 0 # Tracks the times Agent rewrite the letter based on critique feedback
+    needs_refinement: Annotated[bool, or_] = False 
+    refinement_count: int = 0
     error_type: str = ""            
     error_message: str = ""         
     is_fallback: bool = False       
     final_response: str = "" 
-    rewrite_count: int = 0  # Tracks the times Agent re-query Pinecone due to jd and resume mismatch
+    rewrite_count: int = 0
     company_name: str = ""
     company_research: str = ""
     company_research_success: bool = False
-    verification_log: str = ""
-    vector_relevance_score: Optional[float] = None   # Pinecone similarity (0–100)
-    llm_relevance_score: int = 0           # LLM judgment (0–100)
-    verified_skills: List[str] = Field(default_factory=list)  # Simple list for compatibility
+    vector_relevance_score: Optional[float] = None
+    verified_skills: List[str] = Field(default_factory=list)
     unverified_skills: List[str] = Field(default_factory=list)
     verified_skills_detailed: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict) 
-    refinement_edits: List[Dict[str, str]] = Field(default_factory=list)  # NEW
-    refinement_count: int = 0
+    refinement_edits: List[Dict[str, str]] = Field(default_factory=list)
+    verification_score: int = 100
+    joined_context: bool = False
+    ready_to_submit: bool = False
