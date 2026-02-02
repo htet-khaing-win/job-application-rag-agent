@@ -10,9 +10,19 @@ import asyncio
 from langsmith import traceable
 from collections import Counter
 from typing import List, Dict
+from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
 
 load_dotenv()
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+
+def sanitize_json_response(content: str) -> str:
+    """Remove control characters and formatting that break JSON parsing."""
+    content = content.strip().replace("```json", "").replace("```", "")
+    # Remove ASCII control characters (0-31, 127-159)
+    content = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', content)
+    # Normalize multiple spaces
+    content = re.sub(r' {2,}', ' ', content)
+    return content.strip()
 
 # INGEST JOB DESCRIPTION (Entry Node)
 def ingest_jd_node(state: GraphState, llm) -> dict:
@@ -24,25 +34,20 @@ def ingest_jd_node(state: GraphState, llm) -> dict:
     
     combined_prompt = f"""You are processing a job description input.
 
-    TASK 1: Validate if this is a legitimate job description
-    TASK 2: If valid, extract key information
+    TASK 1: Validate if this is a legitimate job description and extract key information if valid
 
     INPUT: {state.job_description}
 
     VALIDATION CRITERIA:
-    - Contains job requirements, qualifications, or responsibilities
-    - Mentions a role title or position
-    - Describes company needs or hiring context
+    - Must be a Job Description
 
     EXTRACTION (if valid):
     - Core Requirements: must-have skills/qualifications
-    - Key Responsibilities: primary duties
-    - Target Keywords: critical ATS terms
 
     OUTPUT (strict JSON, no markdown):
     {{
       "valid": true,
-      "cleaned_jd": "extracted requirements and responsibilities, no fluff"
+      "cleaned_jd": "extracted requirements and responsibilities"
     }}
 
     If invalid:
@@ -53,7 +58,7 @@ def ingest_jd_node(state: GraphState, llm) -> dict:
     """
     
     response = llm.invoke(combined_prompt)
-    content = response.content.strip().replace("```json", "").replace("```", "")
+    content = sanitize_json_response(response.content)
     
     try:
         data = json.loads(content)
@@ -65,10 +70,20 @@ def ingest_jd_node(state: GraphState, llm) -> dict:
                 "error_message": "This doesn't appear to be a job description. Please paste a complete job posting."
             }
         
+        cleaned = data.get("cleaned_jd", "")
+
+        if isinstance(cleaned, dict):
+            # Flatten structured JD into deterministic text
+            cleaned = "\n".join(
+                f"{k}: {', '.join(v) if isinstance(v, list) else v}"
+                for k, v in cleaned.items()
+            )
+
         return {
-            "cleaned_jd": data.get("cleaned_jd", ""),
+            "cleaned_jd": cleaned,
             "is_valid_jd": True
         }
+
         
     except json.JSONDecodeError as e:
         print(f" Job Description parsing error: {e}")
@@ -136,19 +151,8 @@ async def research_company_node(state: GraphState) -> dict:
             "company_research_success": False
         }
 
-def verify_claims_node(state: GraphState, llm) -> dict:
-    """
-    Guardrail Node - Validates that candidate_summary only contains 
-    verifiable information from retrieved_chunks.
-    """
-    return {
-        "candidate_summary": state.candidate_summary,
-        "verified_skills": [],
-        "unverified_skills": [],
-        "verified_skills_detailed": {"with_evidence": [], "no_evidence": []}
-    }
 
-def fallback_handler_node(state: GraphState, llm) -> dict:
+def fallback_handler_node(state: GraphState) -> dict:
     """
     Handles invalid inputs and severe mismatches.
     
@@ -194,35 +198,25 @@ def fallback_handler_node(state: GraphState, llm) -> dict:
 
 # helper Functions for generate_summary_node
 def extract_jd_keywords(cleaned_jd: str, top_k: int = 20) -> List[str]:
-    """Domain-agnostic keyword extraction via frequency analysis."""
-    text = cleaned_jd.lower()
-    tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9+#.-]{2,}", text)
+    """Extract keywords using TF-IDF."""
     
-    stopwords = {
-        "experience", "knowledge", "ability", "skills", "required",
-        "requirements", "responsibilities", "years", "work", "role",
-        "candidate", "team", "will", "must", "should"
-    }
-    tokens = [t for t in tokens if t not in stopwords]
+    stopwords = ENGLISH_STOP_WORDS.union({
+        'experience', 'knowledge', 'ability', 'skills', 'skill', 'required',
+        'requirements', 'requirement', 'responsibilities', 'responsibility',
+        'years', 'year', 'work', 'working', 'role', 'candidate', 'team',
+        'strong', 'good', 'excellent', 'proven', 'demonstrated',
+        'develop', 'build', 'create', 'manage', 'lead', 'support',
+        'including', 'highly', 'successfully', 'effectively'
+    })
     
-    unigrams = tokens
-    MAX_TOKENS = 400
-    tokens = tokens[:MAX_TOKENS]
-
-    bigrams = [f"{tokens[i]} {tokens[i+1]}" for i in range(len(tokens) - 1)]
+    vectorizer = TfidfVectorizer(
+        max_features=top_k,
+        stop_words=list(stopwords),
+        ngram_range=(1, 2)
+    )
     
-    counts = Counter(unigrams + bigrams)
-    
-    # Prefer technical terms
-    ranked = [
-        k for k, v in counts.most_common(top_k * 3)
-        if (v >= 2) or (len(k.split()) > 1 and v >= 1)
-    ]
-    
-    if len(ranked) < top_k:
-        ranked = [k for k, _ in counts.most_common(top_k)]
-    
-    return ranked[:top_k]
+    vectorizer.fit_transform([cleaned_jd])
+    return list(vectorizer.get_feature_names_out())
 
 def match_keywords_to_chunks(
     keywords: List[str],
@@ -247,7 +241,7 @@ def match_keywords_to_chunks(
     return evidence
 
 # GENERATE SUMMARY (The Analyst)
-def generate_summary_node(state: GraphState, llm=None) -> dict:
+def generate_summary_node(state: GraphState) -> dict:
     """
     The Analyst - Creates a bridging narrative between candidate and role.
 
@@ -268,7 +262,7 @@ def generate_summary_node(state: GraphState, llm=None) -> dict:
     verified = sorted(matched.keys(),key=lambda k: len(matched[k]),reverse=True)
 
     unverified = [k for k in jd_keywords if k not in verified]
-    
+
     summary = (
         f"Candidate matches {len(verified)}/{len(jd_keywords)} "
         f"key job requirements.\n\n"
@@ -293,8 +287,7 @@ def generate_summary_node(state: GraphState, llm=None) -> dict:
 # WRITE COVER LETTER (The Copywriter)
 def write_cover_letter_node(state: GraphState, llm) -> dict:
     """
-    The Copywriter - Drafts the initial cover letter with STRICT grounding.
-    Enhanced with multi-layer hallucination prevention.
+    The Copywriter - Generates evidence-grounded cover letter.
     """
     
     if state.vector_relevance_score is None or state.vector_relevance_score <= 0:
@@ -302,177 +295,65 @@ def write_cover_letter_node(state: GraphState, llm) -> dict:
             "Invariant violated: cover letter generation attempted without valid retrieval score."
         )
 
-    # Build skill lists for explicit constraint
+    # Build concise skill evidence map
     skills_with_evidence = state.verified_skills_detailed.get("with_evidence", [])
-    skills_no_evidence = state.verified_skills_detailed.get("no_evidence", [])
-
-    # Create explicit evidence blocks
-    skills_with_ev_text = "\n".join([
-        f"- {s['skill']}: {s['evidence']}" for s in skills_with_evidence
-    ]) if skills_with_evidence else "None"
-
-    skills_no_ev_text = ", ".join([
-        s['skill'] for s in skills_no_evidence
-    ]) if skills_no_evidence else "None"
-
-    unverified_skills_list = ", ".join(state.unverified_skills) if state.unverified_skills else "None"
+    unverified_skills = state.unverified_skills[:3]  # Cap at 3 most important
     
-    # Identify which unverified skills the job actually requires
-    job_required_unverified = []
-    if state.unverified_skills:
-        jd_lower = state.cleaned_jd.lower()
-        for skill in state.unverified_skills:
-            if skill.lower() in jd_lower:
-                job_required_unverified.append(skill)
+    # Format as compact structure
+    verified_block = "\n".join([
+        f"• {s['skill']}: {s['evidence'][:120]}"
+        for s in skills_with_evidence[:8]  # Top 8 only
+    ])
     
-    transfer_learning_guidance = ""
-    if job_required_unverified:
-        transfer_learning_guidance = f"""
-    UNVERIFIED SKILLS REQUIRED BY JOB (Address via transfer learning only):
-    {', '.join(job_required_unverified[:3])}
-
-    TRANSFER LEARNING TEMPLATE:
-    "While I haven't used [UNVERIFIED_SKILL] professionally, my experience with [VERIFIED_SKILL] demonstrates the same [COMPETENCY] required. For example, in [VERIFIED_PROJECT], I [ACHIEVEMENT], which prepared me to quickly adapt to new tools."
-
-    DO NOT claim direct experience with these skills.
-    """
+    unverified_block = ", ".join(unverified_skills) if unverified_skills else "None"
     
-    prompt = f"""You are writing a factual cover letter with zero tolerance for hallucination.
+    # Identify which unverified skills are actually in JD
+    jd_lower = state.cleaned_jd.lower()
+    critical_gaps = [s for s in unverified_skills if s.lower() in jd_lower]
 
-    SKILLS YOU CAN USE (with specific project details): {skills_with_ev_text}
+    allowed_skills = [s["skill"] for s in skills_with_evidence[:8]] + unverified_skills
+    allowed_skills_str = ", ".join(allowed_skills)
 
-    SKILLS YOU CAN MENTION (brief, generic mention only): {skills_no_ev_text}
+    prompt = f"""Write a factual cover letter body.
 
-    FORBIDDEN SKILLS (never claim direct experience):
-    {unverified_skills_list}
+    VERIFIED SKILLS: {verified_block}
 
-    {transfer_learning_guidance}
+    UNVERIFIED SKILLS: {unverified_block}
+    Critical gaps: {', '.join(critical_gaps) if critical_gaps else 'None'}
 
-    ABSOLUTE RULES:
-    1. ONLY use skills from "SKILLS YOU CAN USE" section with their specific evidence
-    2. For "SKILLS YOU CAN MENTION": Brief mention only, no elaboration
-    3. For "FORBIDDEN SKILLS" required by job: Use transfer learning template ONLY
-    4. If a skill is in FORBIDDEN list, you CANNOT claim proficiency
-    5. Every technical claim must cite the EXACT project name from verified evidence
-    6. Forbidden phrases: "proficient in", "extensive experience in", "expert in"
+    COMPANY: {state.company_research}
 
-    STRUCTURE (300-350 words):
+    Do not mention skills outside this list: {allowed_skills_str}
 
-    Paragraph 1 - Opening (40-50 words):
-    - Hook with company-specific insight from research
-    - State position + ONE metric from verified evidence
+    STRUCTURE:
+    P1 (40-50w): Company hook + 1 metric
+    P2 (120-140w): 3 verified skills with evidence + metrics
+    P3 (60-80w): Address gaps via transferable skills OR expand verified achievements
+    P4 (40-50w): Call-to-action + company reference
 
-    Paragraph 2 - Skills Match (120-140 words):
-    - Pick 2-3 skills from "SKILLS YOU CAN USE" section
-    - Include exact project names and metrics
-    - Mirror job keywords naturally
-
-    Paragraph 3 - Growth/Adaptability (60-80 words):
-    - IF job requires FORBIDDEN skills: Use transfer learning (max 2 skills)
-    - IF no FORBIDDEN skills: Expand on verified achievements
-
-    Paragraph 4 - Closing (40-50 words):
-    - Call-to-action referencing company initiative
-    - Company name: [{state.company_name or 'Company Name'}]
-
-    YOUR ONLY SOURCE OF TRUTH:
-
-    VERIFIED CANDIDATE SUMMARY: {state.candidate_summary}
-
-    JOB REQUIREMENTS: {state.cleaned_jd}
-
-    COMPANY RESEARCH: {state.company_research if hasattr(state, 'company_research') else '[Research pending]'}
-
-    OUTPUT REQUIREMENTS:
-    - Return cover letter body only (no "Dear Hiring Manager")
-    - First person, active voice, professional tone
-    - Include 2-4 specific metrics
-    - No bullet points, no parenthetical citations
-
-    CRITICAL: If you cannot find verified evidence for a skill, DO NOT mention it."""
+    RULES:
+    - Use only skills from VERIFIED list with exact evidence
+    - Unverified skills: "prepared to learn via [verified skill]"
+    - Do not introduce any skills/tools not in ALLOWED SKILLS LIST
+    - Company name: {state.company_name}
+        Output cover letter body only."""
     
     response = llm.invoke(prompt)
     letter_content = response.content.strip()
     
-    print(" Your Cover Letter is on the way, verification pending...")
     return {"cover_letter": letter_content}
-
-def verify_letter_claims_node(state: GraphState, llm) -> dict:
-    """
-    Post-generation verification with specific feedback for refinement.
-    """
-    letter = state.cover_letter
-
-    # HARD CAP source
-    source_text = "\n".join(
-        chunk["text"] for chunk in state.retrieved_chunks[:3]
-    )
-
-    prompt = f"""
-STRICT TASK. NO EXPLANATION.
-
-Check whether EVERY factual claim in the LETTER
-is supported by the RESUME SOURCE.
-
-RESUME SOURCE: {source_text}
-
-LETTER: {letter}
-
-OUTPUT JSON ONLY.
-
-If all claims supported:
-{{"pass": true}}
-
-If ANY claim unsupported:
-{{"pass": false}}
-"""
-
-    response = llm.invoke(prompt)
-    raw = response.content.strip()
-
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError:
-        return {
-            "error_type": "hallucination_critical",
-            "error_message": "Verification output malformed"
-        }
-
-    if not result.get("pass", False):
-        return {
-            "error_type": "hallucination_critical",
-            "error_message": "Unsupported claims detected"
-        }
-
-    return {}
 
 
 # CRITIQUE LETTER (The Hiring Manager)
 def critique_letter_node(state: GraphState, llm) -> dict:
-    """
-    The Hiring Manager - Reviews letter for quality and authenticity.
+    """The Hiring Manager - Reviews letter for quality and authenticity."""
     
-    Purpose:
-        - Identifies generic "AI-sounding" phrases
-        - Checks for specific evidence backing claims
-        - Provides actionable feedback for refinement
-    
-    Input: 
-        - state.cover_letter - Draft letter
-        - state.cleaned_jd - Job requirements
-    Output: 
-        - state.critique_feedback - Structured improvement suggestions
-        - state.needs_refinement - Boolean flag for rewrite loop
-    """
+    prompt = f"""You are a Hiring Manager who is expert in criticizing cover letters.
 
-    prompt = f"""You are a diff generator for cover letter refinement.
-
-    TASK: Identify 0-5 HIGH-IMPACT edits only. Each edit must:
+    TASK: Identify 0-5 HIGH-IMPACT edits only if necessary. Each edit must:
     - Target a specific 15-30 character phrase (for exact matching)
-    - Provide a direct replacement (max 2 sentences)
-    - Fix only: generic phrases, missing keywords, weak metrics, or ATS mismatches
-
-    IGNORE: Minor word choices, stylistic preferences, overall structure.
+    - Provide a direct replacement (max 1 sentence)
+    - Fix only: generic phrases, missing keywords
 
     COVER LETTER: {state.cover_letter}
 
@@ -480,64 +361,58 @@ def critique_letter_node(state: GraphState, llm) -> dict:
 
     OUTPUT (strict JSON, no markdown):
     {{
-    "edits": [
+      "edits": [
         {{
-        "type": "replace",
-        "target": "I am passionate about technology",
-        "replacement": "I built 3 production ML pipelines processing 2M+ records",
-        "reason": "Replace generic phrase with verified metric"
+          "type": "replace",
+          "target": "exact phrase",
+          "replacement": "specific text",
+          "reason": "brief"
         }}
-    ],
-    "severity": "minor",
-    "ready_to_submit": true
+      ],
+      "severity": "minor",
+      "ready_to_submit": true
     }}
 
     RULES:
-    - If 0 edits needed: {{"edits": [], "ready_to_submit": true}}
-    - Max 5 edits per iteration
-    - Only target phrases that materially affect ATS scoring or hiring manager perception
-    - NEVER suggest full paragraph rewrites
+    - If no edits needed: {{"edits": [], "ready_to_submit": true}}
     """
     
     response = llm.invoke(prompt)
-    content = response.content.strip().replace("```json", "").replace("```", "")
+    content = sanitize_json_response(response.content)
     
     try:
         data = json.loads(content)
         edits = data.get("edits", [])
         ready = data.get("ready_to_submit", len(edits) == 0)
         
+        # Validate that suggested edits actually exist in the letter
+        valid_edits = []
+        for edit in edits:
+            target = edit.get("target", "")
+            if target in state.cover_letter:
+                valid_edits.append(edit)
+            else:
+                print(f" Critique suggested invalid target: '{target[:40]}...'")
+
         return {
             "critique_feedback": json.dumps(data, indent=2),  # For logging
-            "refinement_edits": edits,  # NEW: Structured edits
-            "needs_refinement": not ready and len(edits) > 0
+            "refinement_edits": valid_edits, 
+            "needs_refinement": not ready and len(valid_edits) > 0  # Clear logic
         }
         
     except json.JSONDecodeError as e:
-        print(f"Critique parse error: {e}")
+        print(f" Critique parse error: {e}")
         return {
             "refinement_edits": [],
             "needs_refinement": False,
-            "ready_to_submit": True
+            "critique_feedback": f"Parse error: {str(e)}"
         }
 
-# REFINE LETTER (The Editor)
 
+# REFINE LETTER (The Editor)
 def refine_letter_node(state: GraphState, llm) -> dict:
     """
     The Editor - Rewrites letter based on critique feedback.
-    
-    Purpose:
-        - Implements specific improvements from critique
-        - Maintains original strengths while fixing issues
-        - Iterates up to 2-3 times for polish
-    
-    Input: 
-        - state.cover_letter - Current draft
-        - state.critique_feedback - Specific improvement requests
-    Output: 
-        - state.cover_letter - Refined version (overwrites)
-        - state.refinement_count - Iteration tracker
     """
     
     edits = state.refinement_edits
@@ -557,15 +432,14 @@ def refine_letter_node(state: GraphState, llm) -> dict:
         if edit_type == "replace":
             replacement = edit.get("replacement", "")
             if target in letter:
-                letter = letter.replace(target, replacement, 1)  # Only first occurrence
-                print(f"Replaced: '{target[:40]}...'")
+                letter = letter.replace(target, replacement, 1)
+                print(f" Replaced: '{target[:40]}...'")
             else:
                 print(f"Target not found: '{target[:40]}...'")
         
         elif edit_type == "delete":
             if target in letter:
                 letter = letter.replace(target, "", 1)
-                # Clean up double spaces
                 letter = re.sub(r'\s{2,}', ' ', letter)
                 print(f"Deleted: '{target[:40]}...'")
         
@@ -576,17 +450,15 @@ def refine_letter_node(state: GraphState, llm) -> dict:
                 letter = letter.replace(anchor, f"{anchor} {content}", 1)
                 print(f"Inserted after: '{anchor[:40]}...'")
 
-    # This is triggered only if insertions create awkward transitions
     needs_flow_fix = any(e.get("type") == "insert_after" for e in edits)
     
     if needs_flow_fix and len(edits) > 1:
-        #Fix transitions only, don't rewrite content
         flow_prompt = f"""Fix ONLY the sentence transitions in this letter. Do not change content, metrics, or structure.
 
-                    LETTER: {letter}
+        LETTER: {letter}
 
-                    RULE: If transitions are already smooth, return the letter unchanged.
-                    Output the letter only, no commentary."""
+        RULE: If transitions are already smooth, return the letter unchanged.
+        Output the letter only, no commentary."""
         
         response = llm.invoke(flow_prompt)
         letter = response.content.strip()
@@ -594,24 +466,22 @@ def refine_letter_node(state: GraphState, llm) -> dict:
     return {
         "cover_letter": letter,
         "refinement_count": state.refinement_count + 1,
-        "needs_refinement": False  # Stop after 1 iteration
+        "needs_refinement": False
     }
 
 def join_context_node(state: GraphState) -> dict:
     """This prevents race conditions between resume verification and company research."""
 
     if not state.candidate_summary:
-        return{
+        return {
             "error_type": "incomplete_context",
             "error_message": "Candidate summary missing."
         }
     
+    updates = {}
     # Optional for Company Research
 
     if not state.company_research:
         state.company_research = "[No Company research available]"
 
-    return{
-        "candidate_summary" : state.candidate_summary,
-        "company_research" : state.company_research
-    }
+    return updates
