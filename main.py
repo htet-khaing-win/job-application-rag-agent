@@ -1,6 +1,6 @@
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
-# from langchain_ollama import ChatOllama
+from langchain_ollama import ChatOllama
 import os
 from dotenv import load_dotenv
 from graph import build_graph
@@ -15,8 +15,6 @@ generator_llm = ChatGoogleGenerativeAI(
     timeout=None,
     max_retries=2,
     api_key = os.getenv("GEMINI_API_KEY"),
-    streaming=True,
-    verbose=True
 )
 
 critic_llm = ChatOpenAI(
@@ -26,8 +24,6 @@ critic_llm = ChatOpenAI(
     timeout=None,
     max_retries=2,
     api_key=os.getenv("OPENAI_API_KEY"),
-    streaming=True,
-    verbose=True
 )
 
 # generator_llm = ChatOllama(
@@ -100,7 +96,7 @@ async def main():
         "cover_letter" : "",
         "critique_feedback" : "",
         "vector_relevance_score": None,
-        "llm_relevance_score" : 0,
+        # "llm_relevance_score" : 0,
         "needs_rewrite" : False,
         "grading_feedback" : "",
         "needs_refinement" : False,
