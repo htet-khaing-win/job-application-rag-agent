@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from pinecone import Pinecone, ServerlessSpec
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain_ollama import OllamaEmbeddings
 from state import GraphState
 from docx import Document
@@ -40,10 +41,14 @@ def get_embeddings():
     global _embeddings
     if _embeddings is None:
         # _embeddings = OllamaEmbeddings(model="nomic-embed-text")
-        _embeddings = GoogleGenerativeAIEmbeddings(
-                    model="models/text-embedding-004",
-                    google_api_key=os.getenv("GEMINI_API_KEY")
-                        )
+        # _embeddings = GoogleGenerativeAIEmbeddings(
+        #             model="models/text-embedding-001",
+        #             google_api_key=os.getenv("GEMINI_API_KEY")
+        #                 )
+        _embeddings = OpenAIEmbeddings(
+            model="text-embedding-3-small",  # 1536 dimensions
+            api_key=os.getenv("OPENAI_API_KEY")
+        )
     return _embeddings
 
 SECTION_PATTERNS = {
@@ -89,13 +94,13 @@ def split_by_sections(text: str):
 
     return sections
 
-def get_index(index_name: str, dimension: int = 768):
+def get_index(index_name: str, dimension: int = 1536):
     """
     Ensures the Pinecone vector infrastructure is ready.
     
     Purpose:
         - Prevents 'Index Not Found' errors by auto-provisioning.
-        - Ensures dimension matches our Google Gemini Embedding model (768).
+        - Ensures dimension matches our Google Gemini Embedding model (1536).
         - Configures ServerlessSpec for cost-effective scaling.
     """
     existing_indexes = [idx.name for idx in pc.list_indexes()]
@@ -127,7 +132,7 @@ def get_pinecone_index():
     global _index
     if _index is None:
         # We hardcode the config here, or load it from env vars
-        _index = get_index(index_name="resume-index", dimension=768)
+        _index = get_index(index_name="resume-index", dimension=1536)
     return _index
 
 
@@ -176,7 +181,7 @@ def ingest_resume_to_pinecone(file_path):
         1. Parse: Extract content based on file extension.
         2. Clean: Anonymize and Normalize text for better embedding quality.
         3. Split: Segment text using SemanticChunker.
-        4. Vectorize: Generate 768-dimension embeddings for each segment.
+        4. Vectorize: Generate 1536-dimension embeddings for each segment.
         5. Storage: Batch upload to Pinecone with source tracking.
 
     Input: 
