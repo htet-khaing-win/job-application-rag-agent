@@ -1,10 +1,13 @@
 """Security primitives: secret redaction, input sanitising, upload validation."""
 from __future__ import annotations
 
+import io
 import logging
 import os
 import re
+import time
 import unicodedata
+import zipfile
 from typing import Tuple
 
 MAX_JD_CHARS = 20_000
@@ -18,6 +21,7 @@ _SECRET_PATTERNS = [
     re.compile(r"AIza[0-9A-Za-z_\-]{30,}"),           # Google
     re.compile(r"tvly-[A-Za-z0-9_\-]{12,}"),          # Tavily
     re.compile(r"pcsk_[A-Za-z0-9_\-]{16,}"),          # Pinecone
+    re.compile(r"(?i)(?<=bearer )[A-Za-z0-9_\-\.=+/]{16,}"),   # opaque bearer tokens / JWTs
     re.compile(r"(?i)(api[_-]?key|authorization|bearer|token)(\"?\s*[:=]\s*\"?)([A-Za-z0-9_\-\.]{12,})"),
 ]
 
@@ -100,6 +104,45 @@ _MAGIC = {
 }
 
 
+MAX_DOCX_UNCOMPRESSED = 50 * 1024 * 1024
+MAX_DOCX_ENTRIES = 2000
+MAX_DOCX_RATIO = 100
+
+
+def _docx_problem(data: bytes) -> str:
+    """Return a rejection reason for a malformed or decompression-bomb .docx, else ''."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            infos = z.infolist()
+            names = {i.filename for i in infos}
+            if "word/document.xml" not in names:
+                return "Not a valid .docx file."
+            if len(infos) > MAX_DOCX_ENTRIES:
+                return "Document has too many parts."
+            if sum(i.file_size for i in infos) > MAX_DOCX_UNCOMPRESSED:
+                return "Document expands too large."
+            for i in infos:
+                if i.filename.startswith(("/", "..")) or ".." in i.filename.split("/"):
+                    return "Document contains unsafe paths."
+                if i.file_size > 1024 * 1024 and i.file_size / max(1, i.compress_size) > MAX_DOCX_RATIO:
+                    return "Document compression ratio is suspicious."
+    except (zipfile.BadZipFile, OSError, ValueError, RuntimeError):
+        return "Not a valid .docx file."
+    return ""
+
+
+def replace_with_retry(src: str, dst: "str | os.PathLike[str]", attempts: int = 20) -> None:
+    """os.replace that tolerates transient PermissionError (Windows file locking under concurrent writers)."""
+    for i in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.01 * (i + 1))
+
+
 def validate_upload(filename: str, data: bytes) -> Tuple[bool, str]:
     """Validate extension, size and magic bytes of an uploaded resume."""
     try:
@@ -115,6 +158,10 @@ def validate_upload(filename: str, data: bytes) -> Tuple[bool, str]:
         return False, "File too large (max 5MB)."
     if ext in _MAGIC and not data.startswith(_MAGIC[ext]):
         return False, "File content does not match its extension."
+    if ext == ".docx":
+        problem = _docx_problem(data)
+        if problem:
+            return False, problem
     if ext == ".txt":
         try:
             data.decode("utf-8")
