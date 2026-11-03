@@ -7,7 +7,9 @@ import streamlit as st
 
 from pipeline import run_pipeline
 from providers import PROVIDERS, providers_for
-from runtime import ROLES, Binding, Profile, Runtime, use_runtime
+from export import letter_to_docx
+from runtime import (PRESETS, ROLES, Binding, Profile, Runtime, check_connection,
+                     preset_profile, use_runtime)
 from security import (MAX_JD_CHARS, install_log_redaction, redact_secrets, safe_filename,
                       validate_upload)
 from vault import KeyVault, VaultError
@@ -26,6 +28,7 @@ if "profile" not in st.session_state:
     st.session_state.profile = Profile.load()
 profile: Profile = st.session_state.profile
 rt = Runtime(vault, profile)
+st.session_state.setdefault("history", [])
 
 st.title("✉️ Job Application Assistant")
 st.caption("Self-healing multi-agent pipeline · keys are encrypted locally and never written to .env")
@@ -55,7 +58,15 @@ with tab_run:
             else:
                 st.subheader("Cover letter")
                 st.text_area("Copy your letter", result["cover_letter"], height=380, label_visibility="collapsed")
-                st.download_button("Download .txt", result["cover_letter"], file_name="cover_letter.txt")
+                d1, d2 = st.columns(2)
+                d1.download_button("Download .txt", result["cover_letter"], file_name="cover_letter.txt")
+                try:
+                    d2.download_button("Download .docx", letter_to_docx(result["cover_letter"], company),
+                                       file_name="cover_letter.docx")
+                except ImportError:
+                    d2.caption("Install python-docx for .docx export")
+                st.session_state.history = ([{"company": company, "letter": result["cover_letter"]}]
+                                            + st.session_state.history)[:10]
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Retrieval score", result.get("vector_relevance_score") or 0)
                 c2.metric("Refinements", result.get("refinement_count", 0))
@@ -63,10 +74,20 @@ with tab_run:
                 with st.expander("Verified / unverified skills"):
                     st.write("**Verified:**", ", ".join(result.get("verified_skills", [])) or "—")
                     st.write("**To address:**", ", ".join(result.get("unverified_skills", [])) or "—")
+            timings = result.get("node_timings", [])
+            if timings:
+                with st.expander("Per-agent timing"):
+                    st.dataframe(timings, use_container_width=True, hide_index=True)
             events = result.get("healing_log", [])
             with st.expander(f"Self-healing log ({len(events)} events)", expanded=bool(events)):
                 for ev in events or ["No recovery actions were needed."]:
                     st.text(ev)
+
+    if st.session_state.history:
+        with st.expander(f"Recent letters ({len(st.session_state.history)}, this session only)"):
+            for i, h in enumerate(st.session_state.history):
+                st.markdown(f"**{h['company']}**")
+                st.text(h["letter"][:600] + ("…" if len(h["letter"]) > 600 else ""))
 
 # ----------------------------------------------------------------- Resumes
 with tab_resumes:
@@ -110,6 +131,11 @@ with tab_resumes:
 with tab_agents:
     st.write("Give each agent its own provider, model and API key. The first entry is primary; "
              "the second is the automatic failover used by the self-healing layer.")
+    pc1, pc2 = st.columns([3, 1])
+    preset = pc1.selectbox("Preset", list(PRESETS), format_func=lambda n: f"{n} — {PRESETS[n]['desc']}")
+    if pc2.button("Apply preset"):
+        st.session_state.profile = preset_profile(preset)
+        st.rerun()
     key_aliases = [""] + [k["alias"] for k in vault.list()]
     new_roles = {}
     for role, meta in ROLES.items():
@@ -138,6 +164,10 @@ with tab_agents:
                     c3.caption("No key needed")
                 bindings.append(Binding(prov, model.strip(), alias))
             new_roles[role] = bindings
+            if st.button("Test connection", key=f"test-{role}"):
+                with st.spinner("Testing…"):
+                    res = check_connection(rt, role)
+                (st.success if res["ok"] else st.error)(f"{res['detail']} ({res['ms']} ms)")
     if st.button("Save agent configuration", type="primary"):
         try:
             candidate = Profile(new_roles)

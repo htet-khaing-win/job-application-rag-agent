@@ -1,0 +1,21 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["utilities", "abtest.py", "baseline_vs_hybrid_AB_test.py", "visualize_graph.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "S", "UP"]
+ignore = ["E501", "S101", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+check_untyped_defs = true
+files = ["security.py", "vault.py", "providers.py", "resilience.py", "runtime.py", "evals"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -p no:cacheprovider"

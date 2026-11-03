@@ -190,3 +190,61 @@ def activate_runtime(rt: Runtime) -> None:
 def default_runtime() -> Runtime:
     """Runtime from the on-disk vault + saved profile (for scripts and CLI tools)."""
     return Runtime(KeyVault(), Profile.load())
+
+
+# --- presets -----------------------------------------------------------------
+def _preset(chat: List[Binding], emb: Binding) -> Dict[str, List[Binding]]:
+    base = _default_roles()
+    for r in ("jd_analyst", "writer", "critic", "editor", "verifier"):
+        base[r] = [Binding(b.provider, b.model, b.key_alias, b.temperature) for b in chat]
+    base["embeddings"] = [emb]
+    return base
+
+
+PRESETS: Dict[str, Dict[str, str]] = {
+    "Balanced (OpenAI + Gemini failover)": {"desc": "gpt-4o-mini primary, Gemini Flash failover"},
+    "Cheap (Gemini Flash only)": {"desc": "Lowest cost, single provider"},
+    "Best quality (Claude + GPT)": {"desc": "Claude primary, GPT failover; higher cost"},
+    "Fully local (Ollama)": {"desc": "No cloud LLM keys; embeddings stay local too (re-index needed if dimension differs)"},
+}
+
+
+def preset_profile(name: str) -> Profile:
+    if name.startswith("Cheap"):
+        roles = _preset([Binding("gemini", "gemini-2.5-flash")], Binding("openai", "text-embedding-3-small"))
+    elif name.startswith("Best"):
+        roles = _preset([Binding("anthropic", "claude-sonnet-5-5"), Binding("openai", "gpt-4o")],
+                        Binding("openai", "text-embedding-3-small"))
+    elif name.startswith("Fully local"):
+        roles = _preset([Binding("ollama", "qwen2.5:7b"), Binding("ollama", "mistral:7b-instruct")],
+                        Binding("ollama", "nomic-embed-text"))
+    else:
+        roles = _default_roles()
+    prof = Profile(roles)
+    prof.validate()
+    return prof
+
+
+# --- connection test -----------------------------------------------------------
+def check_connection(rt: Runtime, role: str) -> Dict[str, Any]:
+    """Cheap live probe of a role's primary binding. Returns {ok, ms, detail} with secrets redacted."""
+    import time
+    from security import redact_secrets
+    b = rt.profile.roles[role][0]
+    kind = ROLES[role]["kind"]
+    t0 = time.perf_counter()
+    try:
+        if PROVIDERS[b.provider].needs_key and not rt.resolve_key(b):
+            return {"ok": False, "ms": 0, "detail": "No API key found for this binding."}
+        if kind == "chat":
+            build_chat_model(b.provider, b.model, rt.resolve_key(b), b.temperature).invoke("Reply with: OK")
+        elif kind == "embedding":
+            rt.embeddings().embed_query("ping")
+        elif kind == "vector":
+            rt.pinecone().list_indexes()
+        elif kind == "search":
+            rt.tavily().search(query="ping", max_results=1)
+        return {"ok": True, "ms": round((time.perf_counter() - t0) * 1000), "detail": "Connected"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "ms": round((time.perf_counter() - t0) * 1000),
+                "detail": redact_secrets(f"{type(e).__name__}: {e}")[:200]}

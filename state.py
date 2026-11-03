@@ -34,3 +34,4 @@ class GraphState(BaseModel):
     healing_log: Annotated[List[str], add] = Field(default_factory=list)
     verification_attempts: int = 0
     letter_verified: bool = False
+    node_timings: Annotated[List[Dict[str, Any]], add] = Field(default_factory=list)

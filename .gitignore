@@ -215,3 +215,9 @@ master.key
 profile.json
 .streamlit/secrets.toml
 .job_application_agent/
+
+# eval artefacts
+evals/reports/
+evals/gold_set.json
+baseline.json
+hybrid.json

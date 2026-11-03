@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import re
+import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from database import retrieve_resumes_node
@@ -223,6 +224,13 @@ class Supervisor:
 
     def guard(self, agent: SubAgent) -> Callable[[GraphState], Awaitable[Update]]:
         async def node(state: GraphState) -> Update:
+            t0 = time.perf_counter()
+            update = await _run(state)
+            update["node_timings"] = [{"node": agent.name,
+                                       "ms": round((time.perf_counter() - t0) * 1000, 1)}]
+            return update
+
+        async def _run(state: GraphState) -> Update:
             last: Optional[BaseException] = None
             for attempt in range(agent.node_retries + 1):
                 try:

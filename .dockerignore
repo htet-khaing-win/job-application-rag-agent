@@ -1,0 +1,11 @@
+.git
+.github
+__pycache__
+.pytest_cache
+resumes/
+*.enc
+master.key
+profile.json
+.env
+.env.*
+evals/reports/

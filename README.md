@@ -198,6 +198,12 @@ The second model in each chat role is its automatic failover.
 ### Self-healing behaviour
 Retry with backoff → provider failover → circuit breaker → JSON output repair → graceful degradation (e.g. critic outage ships the verified draft; writer outage routes to a clear fallback). Ungrounded skill claims are repaired by the Fact Checker or deterministically removed. Every recovery action appears in the GUI "Self-healing log".
 
+### Evaluation
+`python -m evals` computes recall@k / precision@k / MRR / nDCG with bootstrap 95% CIs and a paired permutation test, plus a deterministic letter-faithfulness score. Copy `evals/gold_set.example.json` to `evals/gold_set.json` and label 30-50 queries first; reports are written to `evals/reports/` with the git SHA.
+
+### Developer tooling
+`pyproject.toml` (ruff, mypy, pytest), `.pre-commit-config.yaml` (ruff, gitleaks, private-key detection), `Makefile` (`make test|lint|type|check-staged|docker`), a non-root `Dockerfile`, and Dependabot config. GUI extras: presets, per-agent *Test connection*, per-agent timing, `.docx` export, recent-letter history.
+
 ### Security notes
 Secrets are redacted from logs/errors; JD and web research are fenced as untrusted data in prompts; uploads are validated by extension, magic bytes and size; filenames are sanitised; the GUI binds to `127.0.0.1` with XSRF protection. Do not expose the GUI to a network without an authenticating reverse proxy.
 

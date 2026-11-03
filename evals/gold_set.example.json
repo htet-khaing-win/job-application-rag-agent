@@ -1,0 +1,11 @@
+{
+  "_comment": "Hand-label 30-50 queries. relevant_chunk_ids are Pinecone ids like '<resume file>#<chunk index>'. Copy to gold_set.json.",
+  "queries": [
+    {
+      "id": "q1",
+      "jd": "Senior Python engineer: FastAPI, PostgreSQL, Kubernetes",
+      "namespace": "AI_Engineer_Resume.pdf",
+      "relevant_chunk_ids": ["AI_Engineer_Resume.pdf#2", "AI_Engineer_Resume.pdf#5"]
+    }
+  ]
+}
