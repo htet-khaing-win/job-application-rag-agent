@@ -1,8 +1,8 @@
 from state import GraphState
-from functools import partial
 from langgraph.graph import StateGraph, END, START
-from node import ingest_jd_node, generate_summary_node, write_cover_letter_node, critique_letter_node, refine_letter_node, fallback_handler_node, research_company_node, join_context_node
-from database import retrieve_resumes_node
+from subagents import (Supervisor, JDAnalystAgent, ResearchAgent, RetrieverAgent, AnalystAgent,
+                       WriterAgent, CriticAgent, EditorAgent, FactCheckerAgent,
+                       ContextJoinAgent, FallbackAgent)
 import asyncio
 
 async def should_refine_letter(state: GraphState) -> str:
@@ -47,68 +47,79 @@ def route_after_refine(state: GraphState) -> str:
         return END
     return "critique_letter"
 
-def build_graph(generator_llm, critic_llm):
+def route_after_ingest(state: GraphState):
+    """Fan out to retrieval + research in parallel when the JD is valid."""
+    if state.is_valid_jd:
+        return ["retrieve_resumes", "research_company"]
+    return "fallback_handler"
+
+
+def route_after_join(state: GraphState) -> str:
+    return "fallback_handler" if state.error_type in ("incomplete_context", "generation_failed") else "write_cover_letter"
+
+
+def route_after_write(state: GraphState) -> str:
+    return "fallback_handler" if state.error_type == "generation_failed" or not state.cover_letter.strip() else "verify_letter"
+
+
+def build_graph(generator_llm=None, critic_llm=None):
     """
-    Constructs the LangGraph workflow for job application assistance.
+    Constructs the self-healing LangGraph workflow.
+
+    Every node is a specialised sub-agent guarded by the Supervisor (retry -> degrade).
+    By default each agent resolves its own model + API key from the active runtime profile
+    (see runtime.py). Passing generator_llm / critic_llm pins models explicitly (tests, A/B).
     """
+    pinned = generator_llm is not None or critic_llm is not None
+    gen, crit = generator_llm, critic_llm
+    sup = Supervisor()
+
+    agents = {
+        "ingest_jd": JDAnalystAgent(crit if pinned else None),
+        "research_company": ResearchAgent(),
+        "retrieve_resumes": RetrieverAgent(),
+        "generate_summary": AnalystAgent(),
+        "join_context": ContextJoinAgent(),
+        "write_cover_letter": WriterAgent(gen if pinned else None),
+        "verify_letter": FactCheckerAgent(crit if pinned else None),
+        "critique_letter": CriticAgent(crit if pinned else None),
+        "refine_letter": EditorAgent(gen if pinned else None),
+        "fallback_handler": FallbackAgent(),
+    }
 
     workflow = StateGraph(GraphState)
+    for name, agent in agents.items():
+        workflow.add_node(name, sup.guard(agent))
 
-    # Nodes
-    workflow.add_node("ingest_jd", partial(ingest_jd_node, llm=critic_llm))  
-    workflow.add_node("research_company", research_company_node)  
-    workflow.add_node("retrieve_resumes", retrieve_resumes_node) 
-    workflow.add_node("generate_summary", generate_summary_node)
-    workflow.add_node("write_cover_letter", partial(write_cover_letter_node, llm=generator_llm))
-    workflow.add_node("critique_letter", partial(critique_letter_node, llm=critic_llm))
-    workflow.add_node("refine_letter", partial(refine_letter_node, llm=generator_llm))
-    workflow.add_node("fallback_handler", fallback_handler_node)
-    workflow.add_node("join_context", join_context_node)
-
-
-    # Edges
     workflow.add_edge(START, "ingest_jd")
-    workflow.add_edge("ingest_jd", "research_company")
     workflow.add_conditional_edges(
-        "ingest_jd",
-        lambda state: "retrieve_resumes" if state.is_valid_jd else "fallback_handler",
-        {
-            "retrieve_resumes": "retrieve_resumes",
-            "fallback_handler": "fallback_handler"
-        }
+        "ingest_jd", route_after_ingest,
+        ["retrieve_resumes", "research_company", "fallback_handler"],
     )
-    
     workflow.add_conditional_edges(
-        "retrieve_resumes",
-        route_after_retrieval, 
-        {
-            "generate_summary": "generate_summary",
-            "fallback_handler": "fallback_handler"
-        }
+        "retrieve_resumes", route_after_retrieval,
+        {"generate_summary": "generate_summary", "fallback_handler": "fallback_handler"},
     )
 
-    workflow.add_edge("generate_summary", "join_context")
-    workflow.add_edge("research_company", "join_context")
-
-    workflow.add_edge("join_context", "write_cover_letter")
-    workflow.add_edge("write_cover_letter", "critique_letter")
-
+    # join waits for BOTH branches (list form), unlike two separate edges which fire on either
+    workflow.add_edge(["generate_summary", "research_company"], "join_context")
     workflow.add_conditional_edges(
-        "critique_letter",
-        should_refine_letter,
-        {
-            "refine_letter": "refine_letter",
-            END: END
-        }
+        "join_context", route_after_join,
+        {"write_cover_letter": "write_cover_letter", "fallback_handler": "fallback_handler"},
     )
+    workflow.add_conditional_edges(
+        "write_cover_letter", route_after_write,
+        {"verify_letter": "verify_letter", "fallback_handler": "fallback_handler"},
+    )
+    workflow.add_edge("verify_letter", "critique_letter")
 
     workflow.add_conditional_edges(
-        "refine_letter",
-        route_after_refine,
-        {
-            "critique_letter": "critique_letter",
-            END: END
-        }
+        "critique_letter", should_refine_letter,
+        {"refine_letter": "refine_letter", END: END},
+    )
+    workflow.add_conditional_edges(
+        "refine_letter", route_after_refine,
+        {"critique_letter": "critique_letter", END: END},
     )
 
     workflow.add_edge("fallback_handler", END)

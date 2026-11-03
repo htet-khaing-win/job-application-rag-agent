@@ -166,16 +166,40 @@ ollama pull qwen2.5:7b
 ollama pull nomic-embed-text
 ```
 
-### Step 4: Configure Environment
-Create `.env` file:
-```env
-PINECONE_API_KEY=your_pinecone_api_key
-TAVILY_API_KEY=your_tavily_api_key
+### Step 4: Add API Keys (no `.env` required)
+Keys live in an **encrypted local vault** (Fernet; master key in your OS keychain). Nothing is hard-coded or stored in `.env`.
+
+```bash
+streamlit run app.py            # GUI: API Keys tab
+# or, headless:
+python main.py add-key          # prompted, input hidden
+python main.py list-keys        # masked
 ```
 
-**Get API Keys**:
-- Pinecone: https://app.pinecone.io/ → API Keys → Create Key
-- Tavily: https://app.tavily.com/ → Sign up → Copy Key
+**Get API Keys**: Pinecone (https://app.pinecone.io/), Tavily (https://app.tavily.com/), plus any chat provider you want (OpenAI, Gemini, Anthropic; Ollama needs none).
+
+For CI/headless only, set `JOBAGENT_ALLOW_ENV_KEYS=1` to let the vault fall back to `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `TAVILY_API_KEY`, `PINECONE_API_KEY`.
+
+### Per-agent models (customisation)
+Each sub-agent has its own provider / model / key alias (**Agents & Models** tab, stored in `~/.job_application_agent/profile.json`, no secrets):
+
+| Agent | Role |
+|---|---|
+| JD Analyst | validates + distils the job description |
+| Researcher | live company research (Tavily) |
+| Retriever | hybrid search over resumes (embeddings + Pinecone) |
+| Copywriter | drafts the letter |
+| Fact Checker | blocks/repairs claims about skills with no resume evidence |
+| Hiring Manager | critiques the draft |
+| Editor | applies edits |
+
+The second model in each chat role is its automatic failover.
+
+### Self-healing behaviour
+Retry with backoff → provider failover → circuit breaker → JSON output repair → graceful degradation (e.g. critic outage ships the verified draft; writer outage routes to a clear fallback). Ungrounded skill claims are repaired by the Fact Checker or deterministically removed. Every recovery action appears in the GUI "Self-healing log".
+
+### Security notes
+Secrets are redacted from logs/errors; JD and web research are fenced as untrusted data in prompts; uploads are validated by extension, magic bytes and size; filenames are sanitised; the GUI binds to `127.0.0.1` with XSRF protection. Do not expose the GUI to a network without an authenticating reverse proxy.
 
 ### Step 5: Fit BM25 Model
 **IMPORTANT**: Run this before ingesting resumes to enable hybrid search.

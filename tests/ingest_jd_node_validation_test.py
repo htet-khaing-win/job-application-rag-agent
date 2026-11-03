@@ -43,7 +43,7 @@ def make_llm_mock(response_text: str):
 # VALID Job Description Path
 
 def test_valid_job_description_sets_is_valid_true_and_cleans_jd():
-    llm = make_llm_mock("VALID")
+    llm = make_llm_mock('{"valid": true, "cleaned_jd": "Python engineer: Python, SQL"}')
 
     state = GraphState(job_description="We are hiring a Python Engineer...")
 
@@ -60,7 +60,7 @@ def test_valid_job_description_sets_is_valid_true_and_cleans_jd():
 
 
 def test_invalid_job_description_sets_error_fields():
-    llm = make_llm_mock("INVALID")
+    llm = make_llm_mock('{"valid": false, "cleaned_jd": ""}')
 
     state = GraphState(job_description="Tell me a joke")
 
@@ -104,7 +104,7 @@ def test_invalid_job_description_with_extra_text():
 # Question-Like Job Description
 
 def test_question_like_input_is_invalid():
-    llm = make_llm_mock("INVALID")
+    llm = make_llm_mock('{"valid": false, "cleaned_jd": ""}')
 
     state = GraphState(job_description="Should I apply to Google?")
 
@@ -121,7 +121,7 @@ def test_cleaning_not_triggered_for_invalid_input():
     llm = Mock()
 
     # First call → INVALID
-    llm.invoke.return_value = Mock(content="INVALID")
+    llm.invoke.return_value = Mock(content='{"valid": false, "cleaned_jd": ""}')
 
     state = GraphState(job_description="Random text")
 

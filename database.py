@@ -1,35 +1,31 @@
 import os
-from dotenv import load_dotenv
-from pinecone import Pinecone, ServerlessSpec
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_openai import OpenAIEmbeddings
-from langchain_ollama import OllamaEmbeddings
 from state import GraphState
-from docx import Document
-import pdfplumber
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_experimental.text_splitter import SemanticChunker
 import time
-from privacy import PIIGuard
 import sys
-from pinecone_text.sparse import BM25Encoder
 import re
 import asyncio
 from langsmith import traceable
+from runtime import get_runtime
+from security import safe_filename, redact_secrets
 
-load_dotenv()
-pii_guard = PIIGuard()
-
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 BM25_PATH = "utilities/fitted_bm25.json"
 
+_pii_guard = None
 _bm25 = None
-_index = None
-_embeddings = None
+
+
+def get_pii_guard():
+    global _pii_guard
+    if _pii_guard is None:
+        from privacy import PIIGuard
+        _pii_guard = PIIGuard()
+    return _pii_guard
+
 
 def get_bm25():
     global _bm25
     if _bm25 is None:
+        from pinecone_text.sparse import BM25Encoder
         if os.path.exists(BM25_PATH):
             _bm25 = BM25Encoder()
             _bm25.load(BM25_PATH)
@@ -37,19 +33,11 @@ def get_bm25():
             _bm25 = BM25Encoder.default()
     return _bm25
 
+
 def get_embeddings():
-    global _embeddings
-    if _embeddings is None:
-        # _embeddings = OllamaEmbeddings(model="nomic-embed-text")
-        # _embeddings = GoogleGenerativeAIEmbeddings(
-        #             model="models/text-embedding-001",
-        #             google_api_key=os.getenv("GEMINI_API_KEY")
-        #                 )
-        _embeddings = OpenAIEmbeddings(
-            model="text-embedding-3-small",  # 1536 dimensions
-            api_key=os.getenv("OPENAI_API_KEY")
-        )
-    return _embeddings
+    """Embedding model bound to the 'embeddings' role in the active profile."""
+    return get_runtime().embeddings()
+
 
 SECTION_PATTERNS = {
     "EXPERIENCE": r"(WORK EXPERIENCE|PROFESSIONAL EXPERIENCE|EMPLOYMENT|CAREER HISTORY)",
@@ -94,50 +82,48 @@ def split_by_sections(text: str):
 
     return sections
 
+_index_cache = {}
+
+
 def get_index(index_name: str, dimension: int = 1536):
     """
-    Ensures the Pinecone vector infrastructure is ready.
-    
-    Purpose:
-        - Prevents 'Index Not Found' errors by auto-provisioning.
-        - Ensures dimension matches our Google Gemini Embedding model (1536).
-        - Configures ServerlessSpec for cost-effective scaling.
+    Ensures the Pinecone vector infrastructure is ready (auto-provisions if missing).
+    The Pinecone client is built from the vault-held key for the 'vector_store' role.
     """
+    pc = get_runtime().pinecone()
     existing_indexes = [idx.name for idx in pc.list_indexes()]
 
     if index_name not in existing_indexes:
+        from pinecone import ServerlessSpec
         print(f"Creating new index: {index_name}")
         pc.create_index(
-            name = index_name,
-            dimension = dimension,
-            metric = "dotproduct", # for hybrid search
-            spec = ServerlessSpec(
-                cloud="aws", 
-                region="us-east-1"
-            )
+            name=index_name,
+            dimension=dimension,
+            metric="dotproduct",  # for hybrid search
+            spec=ServerlessSpec(cloud="aws", region="us-east-1"),
         )
-
         while not pc.describe_index(index_name).status['ready']:
             time.sleep(1)
         print(f"Index {index_name} is ready")
-
     else:
         desc = pc.describe_index(index_name)
         if desc.dimension != dimension:
             raise ValueError(f"Index dimension mismatch! Expected {dimension}, found {desc.dimension}")
-        print(f" Connected to existing index: {index_name}")
     return pc.Index(index_name)
 
+
 def get_pinecone_index():
-    global _index
-    if _index is None:
-        # We hardcode the config here, or load it from env vars
-        _index = get_index(index_name="resume-index", dimension=1536)
-    return _index
+    rt = get_runtime()
+    name = rt.index_name()
+    cache_key = (name, id(rt.pinecone()))
+    if cache_key not in _index_cache:
+        _index_cache[cache_key] = get_index(index_name=name, dimension=1536)
+    return _index_cache[cache_key]
 
 
 # Helpers
 def parse_pdf(file_path):
+    import pdfplumber
     text = ""
     with pdfplumber.open(file_path) as pdf:
         for page in pdf.pages:
@@ -146,6 +132,7 @@ def parse_pdf(file_path):
     return text
 
 def parse_docx(file_path):
+    from docx import Document
     doc = Document(file_path)
     return "\n".join(p.text for p in doc.paragraphs)
 
@@ -193,7 +180,7 @@ def ingest_resume_to_pinecone(file_path):
     bm25 = get_bm25()
     index = get_pinecone_index()
     embeddings = get_embeddings()
-    filename = os.path.basename(file_path)
+    filename = safe_filename(os.path.basename(file_path))
     ext = os.path.splitext(file_path)[-1].lower()
 
     #pdf
@@ -208,7 +195,7 @@ def ingest_resume_to_pinecone(file_path):
             text = f.read()
     
     # Redact the sensitive infor before processing
-    safe_text = pii_guard.redact_text(text)
+    safe_text = get_pii_guard().redact_text(text)
 
     # Section detection
     sections = split_by_sections(safe_text)
@@ -225,6 +212,7 @@ def ingest_resume_to_pinecone(file_path):
     sections = cleaned_sections
 
     # Chunking
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=750,
         chunk_overlap=50,
@@ -300,13 +288,14 @@ def delete_resume_from_pinecone(filename: str):
     """
     Deletes all vector chunks associated with a specific filename.
     """
+    filename = safe_filename(filename)
     index = get_pinecone_index()  # Get lazy-loaded instance
     try:
         index.delete(delete_all=True, namespace=filename)
         print(f"Deleted all chunks for {filename}")
         return True
     except Exception as e:
-        print(f"Error deleting {filename}: {str(e)}")
+        print(f"Error deleting {filename}: {redact_secrets(e)}")
         return False
     
 def validate_resume_file(file_path):
@@ -384,7 +373,7 @@ async def retrieve_resumes_node(state: GraphState) -> dict:
     all_matches = []
     for i, result in enumerate(results):
         if isinstance(result, Exception):
-            print(f"Error querying namespace {capped_list[i]}: {result}")
+            print(f"Error querying namespace {capped_list[i]}: {redact_secrets(result)}")
         else:
             all_matches.extend(result.get('matches', []))
 
@@ -427,6 +416,9 @@ async def retrieve_resumes_node(state: GraphState) -> dict:
 if __name__ == "__main__":
     # Check if a file path was actually provided in the terminal
     if len(sys.argv) > 1:
+        from runtime import Runtime, Profile, activate_runtime
+        from vault import KeyVault
+        activate_runtime(Runtime(KeyVault(), Profile.load()))
         resume_path = sys.argv[1]
         print(f"Starting ingestion for: {resume_path}")
         ingest_resume_to_pinecone(resume_path)

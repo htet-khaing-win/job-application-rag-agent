@@ -1,6 +1,6 @@
 from typing import List, Dict, Any, Optional, Annotated
 from pydantic import BaseModel, Field
-from operator import or_
+from operator import or_, add
 
 class GraphState(BaseModel):
     job_description: str
@@ -31,3 +31,6 @@ class GraphState(BaseModel):
     verification_score: int = 100
     joined_context: bool = False
     ready_to_submit: bool = False
+    healing_log: Annotated[List[str], add] = Field(default_factory=list)
+    verification_attempts: int = 0
+    letter_verified: bool = False
