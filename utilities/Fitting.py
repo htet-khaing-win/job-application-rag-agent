@@ -1,13 +1,13 @@
 import os
-from dotenv import load_dotenv
-from pinecone import Pinecone
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from pinecone_text.sparse import BM25Encoder
-
-load_dotenv()
+from runtime import default_runtime
+from security import redact_secrets
 
 def fit_bm25_from_pinecone():
-    pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-    index = pc.Index("resume-index")
+    rt = default_runtime()  # key comes from the encrypted vault, not .env
+    index = rt.pinecone().Index(rt.index_name())
 
     print("Fetching all namespaces...")
     stats = index.describe_index_stats()
@@ -20,7 +20,7 @@ def fit_bm25_from_pinecone():
     print(f"Found {len(namespaces)} namespaces (resumes).")
 
     corpus = []
-    dummy_vector = [0.0] * 768
+    dummy_vector = [0.0] * 1536
 
     for ns in namespaces:
         print(f"  Fetching chunks from namespace: {ns}...")
@@ -43,7 +43,7 @@ def fit_bm25_from_pinecone():
             print(f"Got {len(texts)} chunks")
 
         except Exception as e:
-            print(f"Error fetching namespace {ns}: {str(e)}")
+            print(f"Error fetching namespace {ns}: {redact_secrets(e)}")
             continue
 
     if not corpus:

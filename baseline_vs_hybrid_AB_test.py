@@ -3,20 +3,18 @@ import os
 import json
 import time
 import numpy as np
-from dotenv import load_dotenv
 from langchain_ollama import OllamaEmbeddings, ChatOllama
-from pinecone import Pinecone
 from pinecone_text.sparse import BM25Encoder
 from typing import List, Dict
 from dataclasses import dataclass, asdict
 from scipy import stats
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-load_dotenv()
 
 
 # INITIALIZATION & BM25 FITTING
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+from runtime import default_runtime
+pc = default_runtime().pinecone()  # vault-held key, not .env
 embeddings = OllamaEmbeddings(model="nomic-embed-text")
 
 grading_llm = ChatOllama(

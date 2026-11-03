@@ -70,7 +70,7 @@ def test_partial_state_update_does_not_drop_existing_fields():
     base_state = GraphState(
         job_description="JD",
         is_valid_jd=True,
-        relevance_score=85,
+        vector_relevance_score=85,
         rewrite_count=1
     )
 
@@ -83,7 +83,7 @@ def test_partial_state_update_does_not_drop_existing_fields():
 
     assert merged_state.job_description == "JD"
     assert merged_state.is_valid_jd is True
-    assert merged_state.relevance_score == 85
+    assert merged_state.vector_relevance_score == 85
     assert merged_state.needs_rewrite is True
     assert merged_state.grading_feedback == "Weak match"
     assert merged_state.rewrite_count == 1
@@ -93,7 +93,8 @@ def test_partial_state_update_does_not_drop_existing_fields():
 # No Field Should Ever Become None
 
 
-@pytest.mark.parametrize("field_name", GraphState.model_fields.keys())
+# vector_relevance_score is intentionally None until retrieval runs (routing treats None as "unset").
+@pytest.mark.parametrize("field_name", [f for f in GraphState.model_fields if f != "vector_relevance_score"])
 def test_no_field_is_none_by_default(field_name):
     """
     Ensures every field has a deterministic default value.
@@ -138,14 +139,14 @@ def test_empty_retrieved_chunks_is_valid():
 
 
 @pytest.mark.parametrize("score", [-10, 150])
-def test_relevance_score_out_of_bounds_is_still_serializable(score):
+def test_vector_relevance_score_out_of_bounds_is_still_serializable(score):
     """
     Schema does not enforce bounds.
     Node logic must clamp or handle.
     """
-    state = GraphState(job_description="JD", relevance_score=score)
+    state = GraphState(job_description="JD", vector_relevance_score=score)
 
-    assert state.relevance_score == score
+    assert state.vector_relevance_score == score
 
 
 # Counter Monotonicity (Non-Regressive)

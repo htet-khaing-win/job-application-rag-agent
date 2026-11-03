@@ -4,6 +4,8 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import pytest
+
+pytest.importorskip("presidio_analyzer")
 from pydantic import ValidationError
 from state import GraphState
 from privacy import PIIGuard

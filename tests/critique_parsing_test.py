@@ -29,43 +29,27 @@ class FakeLLM:
         return R()
 
 
-def test_critique_ready_yes_does_not_trigger_refinement():
-    llm = FakeLLM(
-        """
-        Strengths: Clear and specific.
-        Issues to Fix: None.
-        Recommended Changes: None.
-        Ready to Submit? Yes.
-        """
-    )
-
-    state = GraphState(
-        job_description="dummy",
-        cover_letter="dummy",
-        cleaned_jd="dummy"
-    )
-
-    new_state = critique_letter_node(state, llm=llm)
-
-    assert new_state["needs_refinement"] is False
+def _state():
+    return GraphState(job_description="dummy", cover_letter="I built great systems.", cleaned_jd="dummy")
 
 
-def test_critique_ready_no_triggers_refinement():
-    llm = FakeLLM(
-        """
-        Strengths: Good structure.
-        Issues to Fix: Add metrics.
-        Recommended Changes: Rewrite paragraph 2.
-        Ready to Submit? NO
-        """
-    )
+def test_critique_ready_does_not_trigger_refinement():
+    llm = FakeLLM('{"edits": [], "ready_to_submit": true}')
+    assert critique_letter_node(_state(), llm=llm)["needs_refinement"] is False
 
-    state = GraphState(
-        job_description="dummy",
-        cover_letter="dummy",
-        cleaned_jd="dummy"
-    )
 
-    new_state = critique_letter_node(state, llm=llm)
+def test_critique_valid_edit_triggers_refinement():
+    llm = FakeLLM('{"edits": [{"type": "replace", "target": "great systems", "replacement": "scalable systems", "reason": "specific"}], "ready_to_submit": false}')
+    out = critique_letter_node(_state(), llm=llm)
+    assert out["needs_refinement"] is True and len(out["refinement_edits"]) == 1
 
-    assert new_state["needs_refinement"] is True
+
+def test_critique_edit_with_missing_target_is_dropped():
+    llm = FakeLLM('{"edits": [{"type": "replace", "target": "not in letter", "replacement": "x"}], "ready_to_submit": false}')
+    out = critique_letter_node(_state(), llm=llm)
+    assert out["refinement_edits"] == [] and out["needs_refinement"] is False
+
+
+def test_critique_unparseable_output_never_blocks():
+    out = critique_letter_node(_state(), llm=FakeLLM("not json at all"))
+    assert out["needs_refinement"] is False and out["refinement_edits"] == []

@@ -185,3 +185,8 @@ def use_runtime(rt: Runtime) -> Iterator[Runtime]:
 def activate_runtime(rt: Runtime) -> None:
     """Set the runtime for the current context (e.g. at CLI start)."""
     _current.set(rt)
+
+
+def default_runtime() -> Runtime:
+    """Runtime from the on-disk vault + saved profile (for scripts and CLI tools)."""
+    return Runtime(KeyVault(), Profile.load())
