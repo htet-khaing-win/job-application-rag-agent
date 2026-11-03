@@ -1,6 +1,6 @@
 # Job Application RAG Agent
 
-Multi-agent RAG system that generates personalized, ATS-optimized cover letters by matching candidate resumes to job descriptions using hybrid vector search, LLM orchestration, and privacy-first design.
+A self-healing, multi-agent RAG system that writes tailored cover letters by matching your resumes to a job description. It uses hybrid vector search, per-agent model selection, a Streamlit GUI, and an encrypted local key vault. Letters are fact-checked against your resume before you see them.
 
 ---
 
@@ -8,288 +8,248 @@ Multi-agent RAG system that generates personalized, ATS-optimized cover letters 
 
 - [Overview](#overview)
 - [Key Features](#key-features)
-- [System Architecture](#system-architecture)
-- [Safety & Privacy](#safety--privacy)
+- [How It Works](#how-it-works)
 - [Installation](#installation)
 - [Usage](#usage)
+- [Customising Agents and Keys](#customising-agents-and-keys)
+- [Self-Healing](#self-healing)
+- [Security and Privacy](#security-and-privacy)
+- [Evaluation](#evaluation)
+- [Developer Tooling](#developer-tooling)
+- [Known Limitations](#known-limitations)
 - [Project Structure](#project-structure)
-- [Contributing](#contributing)
 - [License](#license)
 
 ---
 
-  ## Overview
+## Overview
 
-I hate doing repetitive things. Especially writing cover letters when there's no guarantee a human will ever read them. I'm also skeptical about sharing my resume with LLMs, given the risks of leaking sensitive personal info, hallucinated qualifications and generic, AI-sounding output. So I automated the entire workflow. 
+I hate doing repetitive things, especially writing cover letters when there's no guarantee a human will ever read them. I'm also wary of sharing my resume with LLMs: leaked personal information, invented qualifications and generic, AI-sounding output are all real risks. So I automated the workflow and built in the safeguards.
 
-This project turns a tedious, error-prone process into a structured, verifiable system that generates personalized, ATS-friendly cover letters without hallucinating qualifications or leaking sensitive data.
+The result is a structured, verifiable pipeline. Your resume is PII-redacted before it is stored. Every letter is checked so it can't claim skills your resume doesn't evidence. The pipeline recovers from provider outages instead of failing.
 
-If this saves you time during job hunting, that's a win in my book.
-
-**Good Luck out there!**
+**Good luck out there!**
 
 ---
 
 ## Key Features
 
-### Privacy-First Architecture
-- **Presidio PII Guard**: Automatically redacts names, emails, phone numbers, URLs, locations, and certificates before vectorization
-- **Custom Burmese Name Recognition**: Extended NER model for multi-cultural name patterns
-- **Local Processing**: All data processing runs on-device using Ollama LLMs
+**Privacy first**
+- Presidio PII redaction (names, emails, phones, locations, LinkedIn/GitHub/certificate URLs) runs before anything is embedded or stored, with extra recognition for Burmese name components.
+- Separate Pinecone namespace per resume prevents cross-contamination.
+- Fully local operation is possible with Ollama models (see [presets](#customising-agents-and-keys)); embeddings must then match your index dimension.
 
-### Intelligent Document Processing
-- **Multi-Format Support**: PDF, DOCX, TXT parsing
-- **Section-Aware Chunking**: Detects resume sections (Experience, Education, Skills) for better retrieval
-- **Hybrid Search**: Combines dense embeddings (Nomic) with sparse BM25 for keyword matching
-- **Namespace Isolation**: Separate Pinecone namespaces prevent resume cross-contamination
+**Hybrid retrieval**
+- Dense embeddings plus BM25 sparse vectors, section-aware chunking (Experience, Education, Skills, ...), PDF/DOCX/TXT ingestion.
 
-### Multi-Agent Orchestration
-- **Generator Agent**: Creative cover letter writing
-- **Critic Agent**: Analytical grading and verification
-- **Stateful Workflow**: LangGraph manages conditional routing and retry logic
-- **Iterative Refinement**: Up to 3 critique loops for quality
+**Specialised sub-agents**
+- JD Analyst, Researcher, Retriever, Analyst, Copywriter, Fact Checker, Hiring Manager and Editor, orchestrated as a LangGraph workflow.
+- Each model-backed agent can use its own provider, model and API key.
 
-### Real-Time Company Research
-- **Tavily AI Integration**: Fetches company mission, values, and recent news
-- **Contextual Personalization**: References actual company initiatives in opening paragraphs
+**Anti-hallucination**
+- Skills are checked against retrieved resume evidence. The Copywriter may only mention verified skills, or unverified ones framed as "prepared to learn".
+- The Fact Checker finds sentences that claim an unverified skill and has a model rewrite them. If the rewrite doesn't fix it, the sentences are removed, so an ungrounded claim cannot ship.
 
-### Anti-Hallucination Safeguards
-- **Claim Verification Node**: Cross-references every statement against resume chunks
-- **Skill Classification**: Separates skills with project evidence from skills only listed
-- **Post-Generation Detection**: Auto-removes sentences with unverified claims
-- **Transfer Learning Prompts**: Addresses unverified skills through demonstrated adaptability
+**Live company research**
+- Tavily search for company mission and news, treated as untrusted data in prompts.
+
+**GUI and CLI**
+- Streamlit app: generate letters, manage resumes, assign models/keys per agent, test connections, view per-agent timing and the self-healing log, export `.txt`/`.docx`.
 
 ---
 
-## System Architecture
-
-### High-Level Flow
+## How It Works
 
 ```
-[HITL: User pastes Job Description + Company Name]
-                    ↓
-Job Description → Validation → Company Research → Vector Retrieval
-                                                           ↓
-                                        Resume Chunks → LLM Grading
-                                                           ↓
-                                        Grade ≥60% → Generate Summary
-                                                           ↓
-                                        Claim Verification → Cover Letter
-                                                           ↓
-                                        Critique → Refine (max 3x) 
-                                                           ↓
-                            [HITL: Review Generated Cover Letter]
+Job description + company
+        |
+   JD Analyst (validate + distil)
+        |
+   +----+------------------+
+   |                       |
+Retriever               Researcher
+(hybrid search)         (Tavily)
+   |                       |
+ Analyst                   |
+(skill evidence)           |
+   +----------+------------+
+              |
+        Context join
+              |
+         Copywriter  --> Fact Checker --> Hiring Manager (critique)
+                                              |
+                                        Editor (one refinement pass)
+                                              |
+                                          Cover letter
 ```
 
-### Component Breakdown
-
-**1. Ingestion Pipeline** (`database.py`)
-```
-Resume → Format Detection → Text Extraction → PII Redaction → 
-Section Splitting → Chunking → Nomic + BM25 Embeddings → Pinecone
-```
-
-**2. Retrieval System**
-- **Hybrid Search**: α=0.4 weighting (60% dense, 40% sparse)
-- **Cross-Namespace**: Queries all resumes simultaneously
-- **Top-K Selection**: Retrieves 10 best chunks across all resumes
-
-**3. Verification Layer**
-- **Skills with Evidence**: Project-backed claims (specific metrics allowed)
-- **Skills without Evidence**: Listed skills (generic mention only)
-- **Unverified Skills**: Job requirements not in resume (transfer learning approach)
-
----
-
-## Safety & Privacy
-
-### PII Protection
-**Presidio Configuration**:
-- NLP Engine: spaCy's `en_core_web_trf` (transformer-based)
-- Custom patterns: LinkedIn, GitHub, phone numbers
-- Burmese name dictionary: 50+ common name components
-
-**Redaction Examples**:
-```
-Original: "Htet Khaing Win, +1-555-123-4567, linkedin.com/in/htetkhaingwin"
-Redacted: "[CANDIDATE_NAME], [PHONE_NUMBER], [LINKEDIN_URL]"
-```
-
-### Hallucination Prevention
-**Multi-Layer Defense**:
-1. **Prompt Engineering**: Explicit allow/deny skill lists
-2. **Post-Generation Check**: Regex detection of unverified skills
-3. **Auto-Fix**: Sentence removal with fallback to error state
-4. **Minimum Content**: Rejects letters <200 words after cleanup
-
-**Example Detection**:
-```
-Detected: "I have extensive Terraform experience"
-Resume: Terraform not mentioned anywhere
-Action: Remove sentence or trigger fallback
-```
-
-### Error Handling
-**Fallback Triggers**:
-- Invalid job description format
-- Empty resume database
-- Retrieval score <50% after 2 rewrite attempts
-- Verification failure (insufficient verifiable skills)
-- Hallucination detected in final output
+- **Retrieval gate:** if retrieval yields no usable score, or there are no resumes, the run ends in a clear fallback message instead of generating a letter.
+- **Refinement:** the critique can trigger one editor pass.
+- **Graceful degradation:** a failed Researcher, Critic or Editor does not fail the run; a failed Copywriter routes to a fallback explanation.
 
 ---
 
 ## Installation
 
 ### Prerequisites
-- Python 3.9+
-- [Ollama](https://ollama.ai/) installed and running
-- Pinecone account (free tier)
-- Tavily API key (free tier: 1000 requests/month)
+- Python 3.11
+- A Pinecone account (free tier works)
+- At least one chat/embedding provider key (OpenAI, Gemini or Anthropic), or [Ollama](https://ollama.ai/) for local models
+- A Tavily key for company research (free tier available)
 
-### Step 1: Clone Repository
+### 1. Clone and install
 ```bash
 git clone https://github.com/htet-khaing-win/job-application-rag-agent.git
 cd job-application-rag-agent
-```
-
-### Step 2: Install Dependencies
-```bash
 pip install -r requirements.txt
 python -m spacy download en_core_web_trf
 ```
 
-### Step 3: Download Ollama Models or Get your own API keys
+### 2. Add API keys (no `.env` needed)
+Keys are stored in an **encrypted local vault** (Fernet). The master key lives in your OS keychain, with a `0600` key file as fallback. Nothing is hard-coded or kept in `.env`.
+
 ```bash
-ollama pull mistral:7b-instruct
+streamlit run app.py          # GUI: "API Keys" tab
+# or headless:
+python main.py add-key        # prompted, input hidden
+python main.py list-keys      # masked output
+python main.py remove-key NAME
+```
+
+For CI or headless use only, set `JOBAGENT_ALLOW_ENV_KEYS=1` to let the vault fall back to `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `TAVILY_API_KEY` and `PINECONE_API_KEY`. Local data lives in `~/.job_application_agent/` (override with `JOBAGENT_HOME`).
+
+### 3. Optional: local models
+```bash
 ollama pull qwen2.5:7b
+ollama pull mistral:7b-instruct
 ollama pull nomic-embed-text
 ```
+Note: the default Pinecone index is 1536-dimensional (OpenAI `text-embedding-3-small`). `nomic-embed-text` is 768-dimensional, so switching embeddings requires a new index and re-ingesting resumes.
 
-### Step 4: Add API Keys (no `.env` required)
-Keys live in an **encrypted local vault** (Fernet; master key in your OS keychain). Nothing is hard-coded or stored in `.env`.
-
-```bash
-streamlit run app.py            # GUI: API Keys tab
-# or, headless:
-python main.py add-key          # prompted, input hidden
-python main.py list-keys        # masked
-```
-
-**Get API Keys**: Pinecone (https://app.pinecone.io/), Tavily (https://app.tavily.com/), plus any chat provider you want (OpenAI, Gemini, Anthropic; Ollama needs none).
-
-For CI/headless only, set `JOBAGENT_ALLOW_ENV_KEYS=1` to let the vault fall back to `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `TAVILY_API_KEY`, `PINECONE_API_KEY`.
-
-### Per-agent models (customisation)
-Each sub-agent has its own provider / model / key alias (**Agents & Models** tab, stored in `~/.job_application_agent/profile.json`, no secrets):
-
-| Agent | Role |
-|---|---|
-| JD Analyst | validates + distils the job description |
-| Researcher | live company research (Tavily) |
-| Retriever | hybrid search over resumes (embeddings + Pinecone) |
-| Copywriter | drafts the letter |
-| Fact Checker | blocks/repairs claims about skills with no resume evidence |
-| Hiring Manager | critiques the draft |
-| Editor | applies edits |
-
-The second model in each chat role is its automatic failover.
-
-### Self-healing behaviour
-Retry with backoff → provider failover → circuit breaker → JSON output repair → graceful degradation (e.g. critic outage ships the verified draft; writer outage routes to a clear fallback). Ungrounded skill claims are repaired by the Fact Checker or deterministically removed. Every recovery action appears in the GUI "Self-healing log".
-
-### Evaluation
-`python -m evals` computes recall@k / precision@k / MRR / nDCG with bootstrap 95% CIs and a paired permutation test, plus a deterministic letter-faithfulness score. Copy `evals/gold_set.example.json` to `evals/gold_set.json` and label 30-50 queries first; reports are written to `evals/reports/` with the git SHA.
-
-### Developer tooling
-`pyproject.toml` (ruff, mypy, pytest), `.pre-commit-config.yaml` (ruff, gitleaks, private-key detection), `Makefile` (`make test|lint|type|check-staged|docker`), a non-root `Dockerfile`, and Dependabot config. GUI extras: presets, per-agent *Test connection*, per-agent timing, `.docx` export, recent-letter history.
-
-### Security notes
-Secrets are redacted from logs/errors; JD and web research are fenced as untrusted data in prompts; uploads are validated by extension, magic bytes and size; filenames are sanitised; the GUI binds to `127.0.0.1` with XSRF protection. Do not expose the GUI to a network without an authenticating reverse proxy.
-
-### Step 5: Fit BM25 Model
-**IMPORTANT**: Run this before ingesting resumes to enable hybrid search.
-
+### 4. Fit the BM25 encoder (recommended)
 ```bash
 python utilities/Fitting.py
 ```
+This writes `utilities/fitted_bm25.json`. Without it, a generic (cold) BM25 encoder is used with reduced keyword accuracy. Run it after ingesting resumes.
 
-This creates `utilities/fitted_bm25.json` for sparse vector encoding. Without this, the system falls back to default (cold) BM25 encoder with reduced accuracy.
-
-### Step 6: Ingest Resumes
+### 5. Ingest resumes
+In the GUI's **Resumes** tab, or:
 ```bash
 python database.py /path/to/resume.pdf
 ```
-
-**Supported formats**: PDF, DOCX, TXT  
-**Max file size**: 5MB  
-**Auto-applies**: PII redaction, section detection, chunking
+Supported: PDF, DOCX, TXT; max 5 MB. PII redaction, section detection and chunking are applied automatically.
 
 ---
 
 ## Usage
 
-### Generate Cover Letter
+### GUI
+```bash
+streamlit run app.py
+```
+Tabs: **Generate**, **Resumes**, **Agents & Models**, **API Keys**, **Security**. The Generate tab shows the letter, retrieval score, refinement count, verified and unverified skills, per-agent timing, and a log of every recovery action.
 
+### CLI
 ```bash
 python main.py
 ```
+Paste the job description, type `DONE` on its own line, then enter the company name. The letter is printed, followed by any self-healing events.
 
-**Interactive Flow**:
-```
-Paste your Job Description below.
-When finished, type 'DONE' on a new line and press Enter.
-
-[Paste job description here]
-DONE
-
-Please enter the company name: PeePeePooPooAI
- Researching company information...
- Retrieved 10 relevant chunks. Top Match Score: 87.3%.
- 
-Your Cover Letter is Ready
----------------------------------
-
-With 3 years of experience building production ML systems, including a 
-recommendation engine that processes 2M+ daily requests with 40ms latency, 
-I'm excited to apply for the Senior ML Engineer position at PeePeePooPooAI...
-
-[Full letter]
-
----------------------------------
- Retrieval Score: 87/100
- Refinement Iterations: 2
-```
-
-### Low Match Example
-
-**Input**: Job requiring skills not in resume  
-**Output**:
-```
-Quality Check Failed - Unverified Claims Detected
-
-Cover letter contained unverified claims about: Terraform, Kubernetes. 
-Auto-fix resulted in insufficient content (156 words).
-
-Solutions:
-1. Upload a resume matching this role better
-2. Try a job posting aligned with your background
-3. Ensure resume includes specific project descriptions
-```
-
-### Manage Resumes
-
-**List stored resumes**:
+### Managing resumes from Python
 ```python
-from database import list_stored_resumes
+from runtime import Runtime, Profile, activate_runtime
+from vault import KeyVault
+from database import list_stored_resumes, delete_resume_from_pinecone
+
+activate_runtime(Runtime(KeyVault(), Profile.load()))
 print(list_stored_resumes())
-```
-
-**Delete resume**:
-```python
-from database import delete_resume_from_pinecone
 delete_resume_from_pinecone("resume.pdf")
 ```
+
+---
+
+## Customising Agents and Keys
+
+Each agent has a provider, model and key alias, set in the **Agents & Models** tab and saved in `~/.job_application_agent/profile.json` (no secrets). The second model in each chat role is its automatic failover.
+
+| Agent | Role |
+|---|---|
+| JD Analyst | validates and distils the job description |
+| Researcher | live company research (Tavily) |
+| Retriever | hybrid search over your resumes (embeddings + Pinecone) |
+| Copywriter | drafts the letter |
+| Fact Checker | repairs letters that claim unsupported skills |
+| Hiring Manager | critiques the draft |
+| Editor | applies the critique's edits |
+
+Presets: **Balanced** (OpenAI + Gemini failover), **Cheap** (Gemini Flash), **Best quality** (Claude + GPT), **Fully local** (Ollama). Each agent has a **Test connection** button that probes its primary model and reports a redacted error if it fails.
+
+---
+
+## Self-Healing
+
+Retry with backoff, then provider failover, behind a circuit breaker. Malformed JSON from a model is sent back for repair. When a model is unavailable the pipeline degrades gracefully: a critic outage ships the verified draft, and a writer outage ends in a clear fallback message. Every recovery action appears in the GUI log and in `result["healing_log"]`.
+
+---
+
+## Security and Privacy
+
+- **Keys:** encrypted vault; never in `.env`, logs, the profile JSON or error messages; masked in the UI.
+- **Redaction:** known key shapes (OpenAI/Anthropic, Google, Tavily, Pinecone) and `key=value` pairs are scrubbed from logs and UI errors.
+- **Prompt injection:** the job description and scraped web content are fenced as untrusted data, with closing-tag spoofing neutralised, control and bidi characters stripped, and length capped. Suspected injection is flagged in the log.
+- **Uploads:** extension, magic bytes, size and encoding checks; filenames sanitised against path traversal.
+- **Network:** the GUI binds to `127.0.0.1` with XSRF protection on and telemetry off. Do not expose it to a network without an authenticating reverse proxy.
+- **PII:** redacted before embedding and storage.
+
+These protections are covered by unit tests using fake models. Behaviour against real provider APIs has not been independently verified.
+
+---
+
+## Evaluation
+
+`python -m evals` computes recall@k, precision@k, MRR and nDCG with bootstrap 95% confidence intervals and a paired permutation test, plus a deterministic letter-faithfulness score.
+
+```bash
+# 1. Copy evals/gold_set.example.json to evals/gold_set.json and label 30-50 queries
+# 2. Collect ranked lists (live; needs vault keys)
+python -m evals --gold evals/gold_set.json --collect baseline --out baseline.json
+python -m evals --gold evals/gold_set.json --collect hybrid   --out hybrid.json
+# 3. Compare
+python -m evals --gold evals/gold_set.json --runs-a baseline.json --runs-b hybrid.json
+# Faithfulness of generated letters
+python -m evals --letters letters.json
+```
+
+Reports are written to `evals/reports/` with the git SHA. Labelling the gold set is manual work and the harness is only as good as those labels; with fewer than 30 queries, expect wide confidence intervals.
+
+---
+
+## Developer Tooling
+
+- `make test | lint | type | eval | check-staged | run | docker`
+- `pyproject.toml` configures ruff, mypy and pytest.
+- `.pre-commit-config.yaml` runs ruff, gitleaks and private-key detection.
+- A non-root `Dockerfile` for the GUI. It has not been build-tested in this repository's CI.
+- `make check-staged` refuses to stage resumes, vault files, profiles or `.env` files.
+
+Tests use fake models and a temporary vault, so no provider keys are needed:
+```bash
+pip install -r requirements.txt
+pytest
+```
+`tests/pii_test.py` needs Presidio and the spaCy transformer model; it is skipped when they are not installed.
+
+---
+
+## Known Limitations
+
+- **Retrieval covers only the first two stored resumes.** Namespaces beyond the second are never queried.
+- **Hybrid weighting is not applied as intended.** The retrieval call passes an `alpha` argument that Pinecone's `query()` does not define; the dense/sparse mix should instead be applied by scaling the query vectors.
+- **One refinement pass.** The critique/edit loop runs at most once.
+- **No CI workflow is committed to this branch.**
+- **Live provider behaviour is untested.** The pipeline is exercised with fake models; real-provider runs are your responsibility to verify.
+
+The branch `feature/hardening-evals-ci` addresses several of these (all-resume retrieval, vector-scaled hybrid weighting, a CI workflow, an expanded evaluation CLI, vault passphrase protection and per-key spend caps). It is awaiting review and is not part of `main`.
 
 ---
 
@@ -297,52 +257,30 @@ delete_resume_from_pinecone("resume.pdf")
 
 ```
 job-application-rag-agent/
-│
-├── main.py                 # Entry point and CLI
-├── graph.py                # LangGraph workflow definition
-├── node.py                 # Agent nodes (generate, verify, critique)
-├── state.py                # Pydantic state schema
-├── database.py             # Pinecone operations and ingestion
-├── privacy.py              # Presidio PII configuration
-│
-├── utilities/
-│   ├── Fitting.py          # BM25 model fitting (run first)
-│   └── fitted_bm25.json    # Generated sparse encoder
-│
-├── requirements.txt        # Dependencies
-├── .env                    # API keys (gitignored)
-└── README.md               # This file
+├── main.py            # CLI entry point (+ add-key / list-keys / remove-key)
+├── app.py             # Streamlit GUI
+├── pipeline.py        # validated entry point used by CLI and GUI
+├── graph.py           # LangGraph workflow and routing
+├── subagents.py       # sub-agents and the self-healing Supervisor
+├── node.py            # node logic (JD ingest, research, write, critique, refine)
+├── database.py        # Pinecone ingestion and hybrid retrieval
+├── runtime.py         # per-agent profile, presets, connection tests
+├── providers.py       # provider registry and lazy client factories
+├── resilience.py      # retry, failover, circuit breaker, JSON repair
+├── vault.py           # encrypted API-key vault
+├── security.py        # redaction, sanitising, upload validation
+├── privacy.py         # Presidio PII configuration
+├── export.py          # .docx export
+├── state.py           # Pydantic state schema
+├── evals/             # retrieval metrics, faithfulness, eval runner
+├── utilities/         # BM25 fitting + fitted encoder
+├── tests/             # unit and fault-injection tests (fake models)
+├── Makefile  Dockerfile  pyproject.toml  .pre-commit-config.yaml
+└── requirements.txt
 ```
-
-### Key Files
-
-**`database.py`**:
-- `ingest_resume_to_pinecone()`: PII redaction + vectorization
-- `retrieve_resumes_node()`: Hybrid search across all resumes
-- `split_by_sections()`: Resume section detection
-
-**`node.py`**:
-- `verify_claims_node()`: Cross-references summary against resume
-- `write_cover_letter_node()`: Generation with hallucination check
-- `critique_letter_node()`: Quality evaluation
-
-**`graph.py`**:
-- Conditional routing (rewrite, refine, fallback)
-- Dual-LLM orchestration (generator vs critic)
 
 ---
-
-## Development Setup
-```bash
-pip install -r requirements.txt
-python utilities/Fitting.py
-python database.py test_resume.pdf
-pytest tests/
-```
-
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
-
----
+MIT License. See [LICENSE](LICENSE) for details.
