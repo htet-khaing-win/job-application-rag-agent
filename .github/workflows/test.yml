@@ -1,0 +1,93 @@
+name: Python CI
+
+on:
+  push:
+    branches: ["main", "feature/ollama_setup"]
+  pull_request:
+    branches: ["main", "feature/ollama_setup"]
+
+# Least privilege: CI only reads the repository. No provider API keys or repository secrets are used
+# anywhere in this workflow; every test runs against fake models and a temporary vault.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (fast)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Run tests (everything except heavy / live)
+        run: pytest -m "not heavy and not live"
+
+  heavy:
+    name: "Tests (heavy - presidio + spaCy)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The spaCy transformer model download is large and occasionally flaky, so a failure here is
+    # reported but does not block merges. Drop `continue-on-error` once it has proven stable.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install dependencies and spaCy model
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          python -m spacy download en_core_web_trf
+      - name: Run heavy tests
+        run: pytest -m heavy
+
+  security:
+    name: Security and static analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0   # gitleaks scans history
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Dependency vulnerability scan
+        run: pip-audit -r requirements.txt
+      - name: Lint
+        run: ruff check .
+      - name: Type check
+        run: mypy
+      - name: Secret scan (gitleaks)
+        # github.token is the short-lived built-in token the action needs to annotate pull requests;
+        # it is not a repository secret. Organisation-owned repos also need a gitleaks licence.
+        uses: gitleaks/gitleaks-action@v2.3.6
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

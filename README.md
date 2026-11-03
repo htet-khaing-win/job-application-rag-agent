@@ -198,14 +198,32 @@ The second model in each chat role is its automatic failover.
 ### Self-healing behaviour
 Retry with backoff → provider failover → circuit breaker → JSON output repair → graceful degradation (e.g. critic outage ships the verified draft; writer outage routes to a clear fallback). Ungrounded skill claims are repaired by the Fact Checker or deterministically removed. Every recovery action appears in the GUI "Self-healing log".
 
+### GUI features
+`streamlit run app.py` (binds to `127.0.0.1` only):
+
+- **Generate**: live view of the writer's draft as it streams in, per-agent progress, a pre-run cost/token estimate, spend-this-month vs per-key caps (the run is blocked if a cap would be exceeded), a run timeout, an editable draft with **Re-check grounding** (flags sentences that claim skills your resume doesn't support), a skills-gap table (evidence chunk per verified skill), `.txt` / `.docx` / `.pdf` export, and recent-letter history with a diff against the previous letter for the same company. Streamlit's own Stop button cancels a run.
+- **Agents & Models**: presets, per-agent provider/model/key, a **Test connection** button per agent (and **Test all**) with 🟢/🔴/⚪ status lights, and a side-by-side profile comparison that lists only the differences.
+- **API Keys / Security**: key age, last use and rotation reminders, per-key monthly spend caps, an optional **vault passphrase** (lock/unlock; while locked the app shows only the unlock form), and editable retrieval settings (`alpha`, max resumes searched, top-k) persisted in your profile.
+- **Runs**: run ids, durations, cost and p50/p95 per agent from the local run log. The log stores timings, token counts and cost only, never letter or resume text.
+- **Chaos mode** (sidebar): a demo that injects random provider faults so you can watch the self-healing log recover. Leave it off for real use.
+
+Tables are rendered as escaped markdown, not `st.dataframe`, so resume text can't inject markup and the GUI doesn't depend on pandas.
+
 ### Evaluation
-`python -m evals` computes recall@k / precision@k / MRR / nDCG with bootstrap 95% CIs and a paired permutation test, plus a deterministic letter-faithfulness score. Copy `evals/gold_set.example.json` to `evals/gold_set.json` and label 30-50 queries first; reports are written to `evals/reports/` with the git SHA.
+`python -m evals <command>` (see `--help`). Commands: `retrieval` (recall@k / precision@k / MRR / nDCG with bootstrap CIs and paired tests), `letters` (claim-level faithfulness), `chaos` (fault injection against fake models), `ablate` and `sweep` (**live**: need your keys), `label` (gold-set tooling), `perf` (latency/token/cost percentiles) and `regress` (CI regression gate against a stored baseline). Copy `evals/gold_set.example.json` to `evals/gold_set.json` and label 30-50 queries before trusting any retrieval number; reports are written to `evals/reports/` with the git SHA.
 
 ### Developer tooling
-`pyproject.toml` (ruff, mypy, pytest), `.pre-commit-config.yaml` (ruff, gitleaks, private-key detection), `Makefile` (`make test|lint|type|check-staged|docker`), a non-root `Dockerfile`, and Dependabot config. GUI extras: presets, per-agent *Test connection*, per-agent timing, `.docx` export, recent-letter history.
+- **Config**: `pyproject.toml` configures ruff (correctness and security rules), mypy and pytest. Pytest markers: `heavy` (needs presidio + the spaCy model) and `live` (calls real providers; never run in CI).
+- **Make**: `make test | test-fast | lint | type | audit | eval | chaos | perf | check-staged | lock | run | docker`.
+- **Dependencies**: `requirements.txt` (runtime) and `requirements-dev.txt` (test/lint/audit). `scripts/lock.sh` generates `requirements.lock` with sha256 hashes via pip-tools; the Dockerfile installs from it with `--require-hashes` when it exists. The lock file is **not** checked in until you run the script (it needs network access).
+- **CI** (`.github/workflows/test.yml`): fast tests, a separate `heavy` job (allowed to fail while the spaCy download proves stable), and a security job (`pip-audit`, ruff, mypy, gitleaks). Read-only permissions, no provider keys or repository secrets. Dependabot covers pip, Actions and Docker.
+- **Pre-commit**: `.pre-commit-config.yaml` (ruff, gitleaks, private-key detection, large-file check). Run `pre-commit install` once.
+- **Docker**: non-root image; `make docker` publishes the GUI on `127.0.0.1` only.
 
 ### Security notes
 Secrets are redacted from logs/errors; JD and web research are fenced as untrusted data in prompts; uploads are validated by extension, magic bytes and size; filenames are sanitised; the GUI binds to `127.0.0.1` with XSRF protection. Do not expose the GUI to a network without an authenticating reverse proxy.
+
+Known gaps (covered by `xfail` tests in `tests/security_corpus_test.py`, so they stay visible): a decompression-bomb `.docx` under 5MB passes upload validation, and an opaque `Authorization: Bearer <token>` header is not scrubbed by the redactor (well-known key shapes and `key=value` pairs are).
 
 ### Step 5: Fit BM25 Model
 **IMPORTANT**: Run this before ingesting resumes to enable hybrid search.
@@ -309,8 +327,11 @@ job-application-rag-agent/
 │   ├── Fitting.py          # BM25 model fitting (run first)
 │   └── fitted_bm25.json    # Generated sparse encoder
 │
-├── requirements.txt        # Dependencies
-├── .env                    # API keys (gitignored)
+├── app.py                  # Streamlit GUI
+├── export.py               # .docx / .pdf export
+├── evals/                  # evaluation harness (python -m evals)
+├── requirements.txt        # Runtime dependencies
+├── requirements-dev.txt    # Test / lint / audit tooling
 └── README.md               # This file
 ```
 
@@ -334,7 +355,7 @@ job-application-rag-agent/
 
 ## Development Setup
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 python utilities/Fitting.py
 python database.py test_resume.pdf
 pytest tests/
