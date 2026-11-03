@@ -10,18 +10,26 @@ import asyncio
 import inspect
 import re
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from database import retrieve_resumes_node
-from node import (critique_letter_node, fallback_handler_node, generate_summary_node,
-                  ingest_jd_node, join_context_node, refine_letter_node,
-                  research_company_node, write_cover_letter_node)
-from resilience import drain_heal_log, record_heal
+from node import (
+    critique_letter_node,
+    fallback_handler_node,
+    generate_summary_node,
+    ingest_jd_node,
+    join_context_node,
+    refine_letter_node,
+    research_company_node,
+    write_cover_letter_node,
+)
+from resilience import drain_heal_log, drain_usage, record_heal
 from runtime import get_runtime
 from security import redact_secrets
 from state import GraphState
 
-Update = Dict[str, Any]
+Update = dict[str, Any]
 Degrade = Callable[[GraphState, BaseException], Update]
 
 
@@ -41,7 +49,7 @@ class SubAgent:
     def run(self, state: GraphState) -> Any:  # pragma: no cover - abstract
         raise NotImplementedError
 
-    def degrade(self, state: GraphState, exc: BaseException) -> Optional[Update]:
+    def degrade(self, state: GraphState, exc: BaseException) -> Update | None:
         """Return a safe state update when the agent cannot recover; None = unrecoverable."""
         return None
 
@@ -52,7 +60,7 @@ class JDAnalystAgent(SubAgent):
     def run(self, state: GraphState) -> Update:
         return ingest_jd_node(state, self.llm)
 
-    def degrade(self, state: GraphState, exc: BaseException) -> Optional[Update]:
+    def degrade(self, state: GraphState, exc: BaseException) -> Update | None:
         from security import sanitize_text
         text = sanitize_text(state.job_description)
         low = text.lower()
@@ -67,10 +75,18 @@ class ResearchAgent(SubAgent):
     role, name = "researcher", "Researcher"
     node_retries = 1
 
+    def __init__(self, llm_override: Any = None, disabled: bool = False):
+        super().__init__(llm_override)
+        self.disabled = disabled  # ablation: never call Tavily, never read/write the cache
+
     async def run(self, state: GraphState) -> Update:
+        if self.disabled:
+            record_heal("[ablation] company research disabled")
+            return {"company_research": f"Unable to fetch current information about {state.company_name}.",
+                    "company_research_success": False}
         return await research_company_node(state)
 
-    def degrade(self, state: GraphState, exc: BaseException) -> Optional[Update]:
+    def degrade(self, state: GraphState, exc: BaseException) -> Update | None:
         return {"company_research": f"Unable to fetch current information about {state.company_name}.",
                 "company_research_success": False}
 
@@ -82,7 +98,7 @@ class RetrieverAgent(SubAgent):
     async def run(self, state: GraphState) -> Update:
         return await retrieve_resumes_node(state)
 
-    def degrade(self, state: GraphState, exc: BaseException) -> Optional[Update]:
+    def degrade(self, state: GraphState, exc: BaseException) -> Update | None:
         return {"retrieved_chunks": [], "vector_relevance_score": 0.0,
                 "error_type": "retrieval_failed",
                 "error_message": "Resume retrieval failed: " + redact_secrets(exc)[:200]}
@@ -94,7 +110,7 @@ class AnalystAgent(SubAgent):
     def run(self, state: GraphState) -> Update:
         return generate_summary_node(state)
 
-    def degrade(self, state: GraphState, exc: BaseException) -> Optional[Update]:
+    def degrade(self, state: GraphState, exc: BaseException) -> Update | None:
         return {"error_type": "generation_failed", "error_message": "Skill analysis failed."}
 
 
@@ -104,7 +120,7 @@ class WriterAgent(SubAgent):
     def run(self, state: GraphState) -> Update:
         return write_cover_letter_node(state, self.llm)
 
-    def degrade(self, state: GraphState, exc: BaseException) -> Optional[Update]:
+    def degrade(self, state: GraphState, exc: BaseException) -> Update | None:
         return {"error_type": "generation_failed",
                 "error_message": "Every configured writer model failed: " + redact_secrets(exc)[:300]}
 
@@ -115,7 +131,7 @@ class CriticAgent(SubAgent):
     def run(self, state: GraphState) -> Update:
         return critique_letter_node(state, self.llm)
 
-    def degrade(self, state: GraphState, exc: BaseException) -> Optional[Update]:
+    def degrade(self, state: GraphState, exc: BaseException) -> Update | None:
         record_heal("[critic] unavailable: skipping critique, shipping verified draft")
         return {"refinement_edits": [], "needs_refinement": False,
                 "critique_feedback": "Critique skipped (model unavailable)."}
@@ -127,7 +143,7 @@ class EditorAgent(SubAgent):
     def run(self, state: GraphState) -> Update:
         return refine_letter_node(state, self.llm)
 
-    def degrade(self, state: GraphState, exc: BaseException) -> Optional[Update]:
+    def degrade(self, state: GraphState, exc: BaseException) -> Update | None:
         record_heal("[editor] unavailable: keeping un-refined letter")
         return {"cover_letter": state.cover_letter, "needs_refinement": False,
                 "refinement_count": state.refinement_count + 1}
@@ -139,7 +155,7 @@ _HEDGES = ("learn", "eager", "transferable", "build on", "building on", "grow", 
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 
-def find_ungrounded_sentences(letter: str, unverified: List[str]) -> List[str]:
+def find_ungrounded_sentences(letter: str, unverified: list[str]) -> list[str]:
     """Sentences that claim an unverified skill without a learning/transfer hedge."""
     bad = []
     for sent in _SENT_SPLIT.split(letter):
@@ -161,7 +177,14 @@ class FactCheckerAgent(SubAgent):
     role, name = "verifier", "Fact Checker"
     MAX_REPAIRS = 2
 
+    def __init__(self, llm_override: Any = None, passthrough: bool = False):
+        super().__init__(llm_override)
+        self.passthrough = passthrough  # ablation: ship the draft unchecked
+
     def run(self, state: GraphState) -> Update:
+        if self.passthrough:
+            record_heal("[ablation] fact checker disabled: letter not verified")
+            return {"letter_verified": False}
         letter = state.cover_letter
         unverified = [s for s in state.unverified_skills if len(s) > 2]
         bad = find_ungrounded_sentences(letter, unverified)
@@ -192,7 +215,7 @@ class FactCheckerAgent(SubAgent):
             letter = re.sub(r"[ \t]{2,}", " ", letter).strip()
         return {"cover_letter": letter, "letter_verified": True, "verification_attempts": attempts}
 
-    def degrade(self, state: GraphState, exc: BaseException) -> Optional[Update]:
+    def degrade(self, state: GraphState, exc: BaseException) -> Update | None:
         bad = find_ungrounded_sentences(state.cover_letter, state.unverified_skills)
         letter = state.cover_letter
         for b in bad:
@@ -228,10 +251,15 @@ class Supervisor:
             update = await _run(state)
             update["node_timings"] = [{"node": agent.name,
                                        "ms": round((time.perf_counter() - t0) * 1000, 1)}]
+            # Attribute LLM usage recorded during this node. Branches that run concurrently
+            # (retrieval / research) make no LLM calls, so attribution stays accurate.
+            usage = drain_usage()
+            if usage:
+                update["node_usage"] = [{**u, "node": agent.name} for u in usage]
             return update
 
         async def _run(state: GraphState) -> Update:
-            last: Optional[BaseException] = None
+            last: BaseException | None = None
             for attempt in range(agent.node_retries + 1):
                 try:
                     out = agent.run(state)

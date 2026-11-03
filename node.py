@@ -3,7 +3,7 @@ import json
 import re
 from langsmith import traceable
 from typing import List, Dict
-from resilience import invoke_json
+from resilience import invoke_json, record_heal
 from runtime import get_runtime
 from security import fence_untrusted, sanitize_text, redact_secrets
 
@@ -102,7 +102,13 @@ async def research_company_node(state: GraphState) -> dict:
     """
     
     company_name = state.company_name
-    
+
+    from cache import get_cached_research, put_cached_research
+    cached = get_cached_research(company_name)
+    if cached:
+        record_heal("[researcher] served company research from 24h cache")
+        return {**cached, "company_research_cached": True}
+
     try:
         tavily_client = get_runtime().tavily()
         # Tavily search query
@@ -131,10 +137,13 @@ async def research_company_node(state: GraphState) -> dict:
         else:
             company_research = f"Company: {company_name} (limited public information available)"
         
-        return {
+        result = {
             "company_research": company_research,
             "company_research_success": True
         }
+        if research_snippets:  # never cache an empty / "limited info" answer
+            put_cached_research(state.company_name, result)
+        return result
         
     except Exception as e:
         print(f"Tavily Research Error: {redact_secrets(e)}")
@@ -160,7 +169,7 @@ def fallback_handler_node(state: GraphState) -> dict:
     """
     
     if state.error_type == "invalid_input":
-        message = f"""
+        message = """
     I couldn't identify this as a job description. 
     """
     
