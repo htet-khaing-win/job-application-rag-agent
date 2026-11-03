@@ -100,11 +100,15 @@ class KeyVault:
         self.app_dir.mkdir(parents=True, exist_ok=True)
         self._path = self.app_dir / "vault.enc"
         self._meta_path = self.app_dir / "vault.meta"
+        self._pending_vault = self.app_dir / "vault.enc.pending"
+        self._pending_meta = self.app_dir / "vault.meta.pending"
+        self._marker = self.app_dir / "vault.commit"
         self._use_keyring = use_keyring
         self._lock = threading.RLock()
         self._session: Dict[str, Dict[str, Any]] = {}  # memory-only keys, never persisted
         self._now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.timezone.utc)
         self._fernet: Optional[Fernet] = None
+        self._recover()
         self._pass_mode = self._meta_path.exists()
         if self._pass_mode:
             if passphrase is not None:
@@ -172,8 +176,7 @@ class KeyVault:
             data = self._read()
             salt = secrets.token_bytes(16)
             new_f = Fernet(_derive_key(passphrase, salt))
-            self._write_blob(new_f.encrypt(json.dumps(data).encode()))
-            self._write_text(self._meta_path, json.dumps({
+            self._commit_pair(new_f.encrypt(json.dumps(data).encode()), json.dumps({
                 "mode": "passphrase",
                 "salt": base64.b64encode(salt).decode(),
                 "canary": new_f.encrypt(_CANARY).decode(),
@@ -189,10 +192,55 @@ class KeyVault:
             self._fernet = f
             data = self._read()
             master = Fernet(_load_master_key(self.app_dir, self._use_keyring))
-            self._write_blob(master.encrypt(json.dumps(data).encode()))
-            self._meta_path.unlink(missing_ok=True)
+            self._commit_pair(master.encrypt(json.dumps(data).encode()), None)
             self._fernet = master
             self._pass_mode = False
+
+    # -- crash-safe two-file commit ------------------------------------------------
+    # vault.enc and vault.meta must change together or the vault becomes undecryptable. The new
+    # contents are written to *.pending files, then vault.commit is created (the commit point).
+    # _apply_commit() is idempotent, and _recover() re-runs it at start-up after a crash:
+    #   crash before the marker  -> stray pending files are discarded (old state intact)
+    #   crash after the marker   -> the remaining replace steps are completed (new state)
+    def _commit_pair(self, vault_blob: bytes, meta_text: Optional[str]) -> None:
+        self._write_bytes_to(self._pending_vault, vault_blob)
+        if meta_text is not None:
+            self._write_bytes_to(self._pending_meta, meta_text.encode("utf-8"))
+        self._write_bytes_to(self._marker, json.dumps({"meta": "write" if meta_text is not None else "delete"}).encode())
+        self._apply_commit()
+
+    def _apply_commit(self) -> None:
+        try:
+            action = json.loads(self._marker.read_text(encoding="utf-8")).get("meta")
+        except (OSError, ValueError):
+            return
+        if self._pending_vault.exists():
+            replace_with_retry(str(self._pending_vault), self._path)
+        if action == "write" and self._pending_meta.exists():
+            replace_with_retry(str(self._pending_meta), self._meta_path)
+        elif action == "delete":
+            self._meta_path.unlink(missing_ok=True)
+        self._marker.unlink(missing_ok=True)
+
+    def _recover(self) -> None:
+        with self._lock:
+            if self._marker.exists():
+                self._apply_commit()
+            for stray in (self._pending_vault, self._pending_meta):
+                stray.unlink(missing_ok=True)
+
+    def _write_bytes_to(self, path: Path, blob: bytes) -> None:
+        fd, tmp = tempfile.mkstemp(dir=self.app_dir)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(blob)
+                fh.flush()
+                os.fsync(fh.fileno())
+            _restrict(Path(tmp))
+            replace_with_retry(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
 
     # -- persistence -----------------------------------------------------------
     def _read(self) -> Dict[str, Dict[str, Any]]:
