@@ -210,7 +210,20 @@ Retry with backoff → provider failover → circuit breaker → JSON output rep
 Tables are rendered as escaped markdown, not `st.dataframe`, so resume text can't inject markup and the GUI doesn't depend on pandas.
 
 ### Evaluation
-`python -m evals <command>` (see `--help`). Commands: `retrieval` (recall@k / precision@k / MRR / nDCG with bootstrap CIs and paired tests), `letters` (claim-level faithfulness), `chaos` (fault injection against fake models), `ablate` and `sweep` (**live**: need your keys), `label` (gold-set tooling), `perf` (latency/token/cost percentiles) and `regress` (CI regression gate against a stored baseline). Copy `evals/gold_set.example.json` to `evals/gold_set.json` and label 30-50 queries before trusting any retrieval number; reports are written to `evals/reports/` with the git SHA.
+`python -m evals <command>` (see `--help`). Commands: `retrieval` (recall@k / precision@k / MRR / nDCG with bootstrap CIs and paired tests), `letters` (claim-level faithfulness), `chaos` (fault injection against fake models), `ablate` and `sweep` (**live**: need your keys), `label` (gold-set tooling), `perf` (latency/token/cost percentiles) and `regress` (CI regression gate against a stored baseline). Reports are written to `evals/reports/` with the git SHA.
+
+**Building a gold set from real listings.** The repository can generate a gold set from public AI/ML engineering listings on MyCareersFuture (Singapore's government job portal) and your own resumes:
+
+```bash
+python -m evals.mcf fetch --target 50                     # public API, rate-limited; -> evals/gold_src/listings.json
+python -m evals.goldgen build --resumes resumes           # -> evals/gold_set.json
+python -m evals.goldgen audit -n 10                       # spot-check labels by eye
+python -m evals retrieval --gold evals/gold_set.json --collect baseline --out baseline.json   # live
+python -m evals retrieval --gold evals/gold_set.json --collect hybrid   --out hybrid.json     # live
+python -m evals retrieval --gold evals/gold_set.json --runs-a baseline.json --runs-b hybrid.json
+```
+
+How it is labelled (a **silver standard**, not human-adjudicated): required skills come from the listing text plus MyCareersFuture's own structured skill tags, mapped through a skill taxonomy (`evals/taxonomy.py`); a skill is *supported* if the resume text matches the same taxonomy; the *relevant spans* are the resume lines that evidence the supported skills. Retrieval is scored by matching retrieved chunk text against those spans, so the labels survive re-chunking and don't depend on Pinecone chunk ids. Skills merely *listed* on a resume count as supported, and taxonomy gaps cause missed or spurious skills, so audit a sample and treat results as indicative until a human has reviewed them. Listing text belongs to the employers: `evals/gold_src/` and `evals/gold_set.json` are gitignored, so keep them local. The hand-labelled workflow (`python -m evals label ...`) remains available for a human-reviewed gold set.
 
 ### Developer tooling
 - **Config**: `pyproject.toml` configures ruff (correctness and security rules), mypy and pytest. Pytest markers: `heavy` (needs presidio + the spaCy model) and `live` (calls real providers; never run in CI).
@@ -223,7 +236,7 @@ Tables are rendered as escaped markdown, not `st.dataframe`, so resume text can'
 ### Security notes
 Secrets are redacted from logs/errors; JD and web research are fenced as untrusted data in prompts; uploads are validated by extension, magic bytes and size; filenames are sanitised; the GUI binds to `127.0.0.1` with XSRF protection. Do not expose the GUI to a network without an authenticating reverse proxy.
 
-Known gaps (covered by `xfail` tests in `tests/security_corpus_test.py`, so they stay visible): a decompression-bomb `.docx` under 5MB passes upload validation, and an opaque `Authorization: Bearer <token>` header is not scrubbed by the redactor (well-known key shapes and `key=value` pairs are).
+Uploads: `.docx` files must be structurally valid (contain `word/document.xml`) and are rejected when they expand beyond 50MB, exceed 2000 parts, contain unsafe paths, or have a compression ratio above 100:1. The redactor scrubs well-known key shapes, `key=value` pairs and opaque `Bearer` tokens. Passphrase protection is crash-safe: the vault and its metadata are committed together through a journal, and start-up recovery completes or rolls back an interrupted change.
 
 ### Step 5: Fit BM25 Model
 **IMPORTANT**: Run this before ingesting resumes to enable hybrid search.

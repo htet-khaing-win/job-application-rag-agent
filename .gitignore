@@ -221,3 +221,6 @@ evals/reports/
 evals/gold_set.json
 baseline.json
 hybrid.json
+
+# third-party listing text (MyCareersFuture) used for local evaluation only
+evals/gold_src/

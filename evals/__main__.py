@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from evals import regress
 from evals.metrics import compare, evaluate_run, flatten_rows
 from evals.report import build_report, save_report
+from evals.spans import evaluate_run_spans
 
 
 def _read(path: str) -> Any:
@@ -66,24 +67,42 @@ def _add_common(p: argparse.ArgumentParser) -> None:
 
 
 # ------------------------------------------------------------------------------------ retrieval
-def collect(gold: Dict[str, Any], method: str, k: int, alpha: float) -> Dict[str, List[str]]:
+def collect(gold: Dict[str, Any], method: str, k: int, alpha: float) -> Dict[str, Any]:
     """Live ranked lists. Hybrid scales dense by alpha and sparse by (1 - alpha), the documented Pinecone
     approach (Pinecone's query API has no `alpha` argument)."""
     from database import get_bm25, get_embeddings, get_pinecone_index
     from runtime import activate_runtime
     activate_runtime(_runtime())
     emb, bm25, index = get_embeddings(), get_bm25(), get_pinecone_index()
-    out: Dict[str, List[str]] = {}
+    out: Dict[str, Any] = {}
+    spans_mode = _is_span_gold(gold)   # span gold needs chunk text to match against, not just ids
     for q in gold["queries"]:
         dense = emb.embed_query(q["jd"])
-        kw: Dict[str, Any] = dict(top_k=k, include_metadata=False, namespace=q["namespace"])
+        kw: Dict[str, Any] = dict(top_k=k, include_metadata=spans_mode, namespace=q["namespace"])
         if method == "hybrid":
             sp = bm25.encode_queries(q["jd"])
             kw.update(vector=[v * alpha for v in dense],
                       sparse_vector={"indices": sp["indices"], "values": [v * (1 - alpha) for v in sp["values"]]})
         else:
             kw.update(vector=dense)
-        out[q["id"]] = [m["id"] for m in index.query(**kw)["matches"]]
+        matches = index.query(**kw)["matches"]
+        out[q["id"]] = ([{"id": m["id"], "text": (m.get("metadata") or {}).get("text", "")} for m in matches]
+                        if spans_mode else [m["id"] for m in matches])
+    return out
+
+
+def _is_span_gold(gold: Dict[str, Any]) -> bool:
+    """Schema v2 gold (evals.goldgen): relevance = evidence spans matched against chunk text."""
+    return any("relevant_spans" in q for q in gold["queries"])
+
+
+def _bucket_means(gold: Dict[str, Any], per_query: Dict[str, List[float]], metric: str) -> Dict[str, float]:
+    scorable = [q for q in gold["queries"] if q.get("relevant_spans")]
+    out: Dict[str, float] = {}
+    for b in ("high", "medium", "low"):
+        vals = [v for q, v in zip(scorable, per_query[metric]) if q.get("bucket") == b]
+        if vals:
+            out[f"{b} (n={len(vals)})"] = round(sum(vals) / len(vals), 4)
     return out
 
 
@@ -99,9 +118,14 @@ def cmd_retrieval(a: argparse.Namespace) -> int:
         print("retrieval needs --gold, --runs-a and --runs-b (or --collect).")
         return 2
     gold = _read(a.gold)
-    truth = {q["id"]: q["relevant_chunk_ids"] for q in gold["queries"]}
-    base = evaluate_run(_read(a.runs_a), truth, a.k)
-    cand = evaluate_run(_read(a.runs_b), truth, a.k)
+    if _is_span_gold(gold):
+        truth = {q["id"]: q["relevant_spans"] for q in gold["queries"] if q.get("relevant_spans")}
+        base = evaluate_run_spans(_read(a.runs_a), gold["queries"], a.k)
+        cand = evaluate_run_spans(_read(a.runs_b), gold["queries"], a.k)
+    else:
+        truth = {q["id"]: q["relevant_chunk_ids"] for q in gold["queries"]}
+        base = evaluate_run(_read(a.runs_a), truth, a.k)
+        cand = evaluate_run(_read(a.runs_b), truth, a.k)
     rows = compare(base, cand)
     print(f"{'metric':<14}{'base':>8}{'cand':>8}{'95% CI':>20}{'delta':>8}{'p_perm':>8}{'p_wilc':>8}{'p_holm':>8}"
           f"{'dz':>7}{'sig':>5}")
@@ -110,6 +134,12 @@ def cmd_retrieval(a: argparse.Namespace) -> int:
               f"{'[%s, %s]' % (r['ci_lo'], r['ci_hi']):>20}{r['delta']:>8}{r['p_value']:>8}{r['p_wilcoxon']:>8}"
               f"{r['p_holm']:>8}{r['dz']:>7}{'*' if r['significant'] else '':>5}")
     warns = []
+    if _is_span_gold(gold):
+        nd = f"ndcg@{a.k}"
+        print()
+        print(f"{nd} by coverage bucket   baseline: {_bucket_means(gold, base, nd)}")
+        print(f"{'':<{len(nd) + 22}}candidate: {_bucket_means(gold, cand, nd)}")
+        warns.append(f"labels are {gold.get('meta', {}).get('labeling', 'unspecified')}.")
     if len(truth) < 30:
         warns.append(f"only {len(truth)} queries; confidence intervals will be wide.")
     report = build_report("retrieval", {"n_queries": len(truth), "rows": rows}, flatten_rows(rows),
