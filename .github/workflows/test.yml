@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v5.3.0
         with:
           python-version: "3.11"
@@ -44,7 +44,7 @@ jobs:
     # reported but does not block merges. Drop `continue-on-error` once it has proven stable.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v5.3.0
         with:
           python-version: "3.11"
@@ -65,7 +65,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0   # gitleaks scans history
       - uses: actions/setup-python@v5.3.0
