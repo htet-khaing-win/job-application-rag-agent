@@ -10,3 +10,12 @@ gatherUsageStats = false
 
 [client]
 toolbarMode = "viewer"
+
+# Light, colourful chat-style theme (the app adds gradients and bubbles on top of this in app.py).
+[theme]
+base = "light"
+primaryColor = "#7C3AED"
+backgroundColor = "#FAF9FF"
+secondaryBackgroundColor = "#EDE9FE"
+textColor = "#1F1B2E"
+font = "sans serif"

@@ -1,11 +1,16 @@
-"""Streamlit GUI.  Run:  streamlit run app.py   (binds to 127.0.0.1 only; see .streamlit/config.toml)
+"""Streamlit GUI (chat-style).  Run:  streamlit run app.py   (binds to 127.0.0.1 only; see .streamlit/config.toml)
+
+Home is a chat: paste a job description, name the company, and the agents reply with a cover letter you can
+edit, re-check, export and (when you're happy) save to a local history of up to 10 letters per page that you
+can delete permanently. Everything else (resumes, agents, keys, runs, security) lives behind the sidebar.
 
 Optional modules (cost, runlog, vault passphrase API, PDF export) are probed defensively so the
 app still renders if one is absent in a given build.
 """
 import asyncio
-import datetime as dt
 import difflib
+import html
+import math
 import re
 import tempfile
 from pathlib import Path
@@ -14,10 +19,11 @@ from typing import Any
 import streamlit as st
 
 from export import letter_to_docx, letter_to_pdf
+from history import PAGE_SIZE, HistoryError, HistoryStore
 from pipeline import run_pipeline
 from providers import PROVIDERS, providers_for
 from runtime import PRESETS, ROLES, Binding, Profile, Runtime, check_connection, preset_profile, use_runtime
-from security import MAX_JD_CHARS, install_log_redaction, redact_secrets, safe_filename, validate_upload
+from security import MAX_JD_CHARS, install_log_redaction, redact_secrets, safe_filename, sanitize_text, validate_upload
 from subagents import find_ungrounded_sentences
 from vault import KeyVault, VaultError
 
@@ -30,15 +36,96 @@ try:  # structured run log
 except ImportError:  # pragma: no cover
     runlog = None  # type: ignore[assignment]
 
-st.set_page_config(page_title="Job Application Assistant", page_icon="✉️", layout="wide")
+st.set_page_config(page_title="Cover Letter Studio", page_icon="✨", layout="wide")
 install_log_redaction()
 
 LIGHT = {"ok": "🟢", "fail": "🔴", "none": "⚪"}
 SETTING_DEFAULTS = {"alpha": 0.4, "max_resumes": 10, "top_k": 10}
 _PRIVATE_KEY_HINTS = ("letter", "cover", "text", "prompt", "resume", "secret", "key")
+MIN_JD_CHARS = 60
+
+PAGE_CHAT, PAGE_HISTORY = "💬 Chat", "📚 History"
+PAGE_RESUMES, PAGE_AGENTS = "📄 Resumes", "🤖 Agents & Models"
+PAGE_KEYS, PAGE_RUNS, PAGE_SECURITY = "🔑 API Keys", "📊 Runs", "🛡️ Security"
+PAGES = [PAGE_CHAT, PAGE_HISTORY, PAGE_RESUMES, PAGE_AGENTS, PAGE_KEYS, PAGE_RUNS, PAGE_SECURITY]
+
+GREETING = ("Hi! I'm your **cover-letter studio** ✨ Paste the **job description** below and I'll write a letter "
+            "that only claims skills your resume can back up. When you're happy with one, save it to your history.")
+
+# Static theme CSS. Nothing user-supplied is ever interpolated into HTML: dynamic text goes through
+# html.escape() in _chip(), everything else is rendered with st.text / escaped markdown.
+_THEME_CSS = """
+<style>
+:root { --violet:#7C3AED; --pink:#EC4899; --blue:#3B82F6; --mint:#10B981; --amber:#F59E0B; --ink:#1F1B2E; }
+.stApp {
+  background:
+    radial-gradient(1100px 520px at 8% -8%, #E9DDFF 0%, rgba(233,221,255,0) 60%),
+    radial-gradient(900px 480px at 100% 0%, #FFD9EC 0%, rgba(255,217,236,0) 55%),
+    radial-gradient(800px 500px at 50% 110%, #D5F5EA 0%, rgba(213,245,234,0) 60%),
+    #FAF9FF;
+}
+header[data-testid="stHeader"] { background: transparent; }
+[data-testid="stSidebar"] { background: linear-gradient(185deg, #4C1D95 0%, #7C3AED 55%, #DB2777 135%); }
+[data-testid="stSidebar"] * { color: #F5F3FF; }
+[data-testid="stSidebar"] [role="radiogroup"] { gap: .25rem; }
+[data-testid="stSidebar"] [role="radiogroup"] label {
+  background: rgba(255,255,255,.10); border-radius: 12px; padding: .45rem .8rem; transition: all .15s ease;
+}
+[data-testid="stSidebar"] [role="radiogroup"] label:hover { background: rgba(255,255,255,.22); transform: translateX(2px); }
+[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
+  background: #FFFFFF; box-shadow: 0 6px 16px rgba(0,0,0,.18);
+}
+[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) * { color: #4C1D95; font-weight: 700; }
+[data-testid="stSidebar"] [data-testid="stExpander"] { background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.30); }
+[data-testid="stSidebar"] [data-testid="stExpander"] summary:hover { background: rgba(255,255,255,.14); }
+[data-testid="stSidebar"] hr { border-color: rgba(255,255,255,.25); }
+.brand { font-size: 1.45rem; font-weight: 800; letter-spacing: .2px; margin: .2rem 0 .1rem 0; }
+.brand-sub { font-size: .8rem; opacity: .85; margin-bottom: .8rem; }
+.hero {
+  border-radius: 20px; padding: 1.1rem 1.4rem; margin-bottom: 1rem; color: #fff;
+  background: linear-gradient(120deg, #7C3AED 0%, #EC4899 60%, #F59E0B 120%);
+  box-shadow: 0 12px 30px rgba(124,58,237,.25);
+}
+.hero h1 { color:#fff; font-size: 1.6rem; margin: 0; padding: 0; }
+.hero p { margin: .25rem 0 0 0; opacity: .95; }
+[data-testid="stChatMessage"] {
+  background: #FFFFFF; border: 1px solid #EEE9FF; border-radius: 20px; padding: .9rem 1.1rem;
+  box-shadow: 0 8px 24px rgba(76,29,149,.08); margin-bottom: .6rem;
+}
+[data-testid="stChatMessage"]:has(.user-marker) {
+  background: linear-gradient(135deg, #7C3AED 0%, #EC4899 100%); border: none;
+  box-shadow: 0 10px 26px rgba(124,58,237,.30);
+}
+[data-testid="stChatMessage"]:has(.user-marker) * { color: #FFFFFF !important; }
+[data-testid="stChatMessage"]:has(.user-marker) [data-testid="stExpander"] { background: rgba(255,255,255,.14); border-radius: 12px; }
+[data-testid="stChatInput"] { border-radius: 18px; box-shadow: 0 10px 30px rgba(124,58,237,.18); border: 2px solid #C4B5FD; }
+.stButton > button, .stDownloadButton > button {
+  border-radius: 12px; border: 1px solid #DDD6FE; transition: all .15s ease; font-weight: 600;
+}
+.stButton > button:hover, .stDownloadButton > button:hover { transform: translateY(-1px); box-shadow: 0 6px 14px rgba(124,58,237,.18); border-color: #7C3AED; }
+.stButton > button[kind="secondary"] { background: #FFFFFF; color: #4C1D95; }
+.stButton > button[kind="primary"] {
+  background: linear-gradient(135deg, #7C3AED, #EC4899); color: #fff; border: none;
+}
+[data-testid="stExpander"] { border-radius: 14px; border: 1px solid #E9E3FF; background: rgba(255,255,255,.7); }
+[data-testid="stMetric"] { background: #fff; border-radius: 16px; padding: .6rem .9rem; border: 1px solid #EEE9FF; box-shadow: 0 4px 14px rgba(76,29,149,.06); }
+[data-testid="stVerticalBlockBorderWrapper"] { border-radius: 18px; }
+.chip { display:inline-block; padding: .16rem .65rem; border-radius: 999px; font-size: .78rem; font-weight: 700; margin: 0 .3rem .25rem 0; }
+.chip-violet { background:#EDE9FE; color:#5B21B6; } .chip-green { background:#D1FAE5; color:#047857; }
+.chip-pink { background:#FCE7F3; color:#BE185D; }   .chip-blue { background:#DBEAFE; color:#1D4ED8; }
+.chip-amber { background:#FEF3C7; color:#B45309; }  .chip-grey { background:#F1F5F9; color:#475569; }
+.card-title { font-weight: 800; font-size: 1.05rem; color: #1F1B2E; }
+</style>
+"""
 
 
 # ------------------------------------------------------------------ small helpers
+def _chip(text: Any, tone: str = "violet") -> str:
+    """A coloured pill. The only place dynamic text reaches HTML, so it is always escaped."""
+    tone = tone if tone in {"violet", "green", "pink", "blue", "amber", "grey"} else "violet"
+    return f'<span class="chip chip-{tone}">{html.escape(str(text))}</span>'
+
+
 def _scrub(obj: Any) -> Any:
     """Drop anything that could carry letter/resume text or secrets before rendering log data."""
     if isinstance(obj, dict):
@@ -114,10 +201,30 @@ def _mentions(skill: str, text: str) -> bool:
     return bool(re.search(rf"(?<!\w){re.escape(skill.lower())}(?!\w)", text.lower()))
 
 
+def _guess_title(jd: str) -> str:
+    """Best-effort job title: the first short line of the posting (history label only)."""
+    for line in sanitize_text(jd, 2000).splitlines():
+        line = line.strip(" -•*#\t")
+        if len(line) > 90:                       # one long paragraph: use its first clause ("ML Engineer. Requirements: ...")
+            line = re.split(r"[.:;|]| - ", line, maxsplit=1)[0].strip(" -•*#\t")
+        if 3 <= len(line) <= 90:
+            return line
+    return "Untitled role"
+
+
+def _pretty_date(iso: str) -> str:
+    try:
+        return f"{iso[:10]} {iso[11:16]} UTC"
+    except Exception:  # noqa: BLE001
+        return iso
+
+
 @st.cache_resource
 def get_vault() -> KeyVault:
     return KeyVault()
 
+
+st.markdown(_THEME_CSS, unsafe_allow_html=True)
 
 # ------------------------------------------------------------------ vault gate
 vault = get_vault()
@@ -137,9 +244,15 @@ if getattr(vault, "is_locked", False):
 if "profile" not in st.session_state:
     st.session_state.profile = Profile.load()
 profile: Profile = st.session_state.profile
-st.session_state.setdefault("history", [])
 st.session_state.setdefault("conn_status", {})
 st.session_state.setdefault("last_result", None)
+st.session_state.setdefault("messages", [{"role": "assistant", "kind": "text", "content": GREETING}])
+st.session_state.setdefault("chat_stage", "await_jd")
+st.session_state.setdefault("pending_jd", "")
+st.session_state.setdefault("run_request", None)
+st.session_state.setdefault("hist_page", 0)
+st.session_state.setdefault("confirm_delete", None)
+st.session_state.setdefault("timeout_s", 180)
 
 
 def _settings() -> dict[str, Any]:
@@ -148,23 +261,26 @@ def _settings() -> dict[str, Any]:
 
 rt = Runtime(vault, profile)
 
-# ------------------------------------------------------------------ sidebar: chaos demo
-with st.sidebar.expander("🧪 Chaos mode (demo)"):
-    st.caption("Demo of self-healing: randomly injects provider faults (timeouts, 429s, bad JSON, auth errors) "
-               "into model calls. Leave off for real use; expect slower, sometimes degraded runs. "
-               "Watch the self-healing log after a run.")
-    _chaos_on = st.toggle("Enable chaos", key="chaos_on")
-    _chaos_p = st.slider("Fault probability", 0.0, 0.9, 0.3, 0.05, key="chaos_p", disabled=not _chaos_on)
+# ------------------------------------------------------------------ sidebar: brand, navigation, run options
+with st.sidebar:
+    st.markdown('<div class="brand">✨ Cover Letter Studio</div>'
+                '<div class="brand-sub">Grounded in your resume · keys stay on this machine</div>',
+                unsafe_allow_html=True)
+    page = st.radio("Navigate", PAGES, key="nav", label_visibility="collapsed")
+    st.divider()
+    with st.expander("⚙️ Run options"):
+        st.slider("Timeout (seconds)", 30, 600, 180, 10, key="timeout_s",
+                  help="A run is aborted after this long. Streamlit's Stop button (top right while running) also cancels.")
+    with st.expander("🧪 Chaos mode (demo)"):
+        st.caption("Demo of self-healing: randomly injects provider faults (timeouts, 429s, bad JSON, auth errors) "
+                   "into model calls. Leave off for real use; expect slower, sometimes degraded runs. "
+                   "Watch the self-healing log after a run.")
+        _chaos_on = st.toggle("Enable chaos", key="chaos_on")
+        _chaos_p = st.slider("Fault probability", 0.0, 0.9, 0.3, 0.05, key="chaos_p", disabled=not _chaos_on)
 try:
     rt.chaos = float(_chaos_p) if _chaos_on else 0.0  # type: ignore[attr-defined]
 except AttributeError:  # pragma: no cover
     pass
-
-st.title("✉️ Job Application Assistant")
-st.caption("Self-healing multi-agent pipeline · keys are encrypted locally and never written to .env")
-
-tab_run, tab_resumes, tab_agents, tab_keys, tab_runs, tab_security = st.tabs(
-    ["Generate", "Resumes", "Agents & Models", "API Keys", "Runs", "Security"])
 
 
 # ------------------------------------------------------------------ cost / budget
@@ -221,47 +337,100 @@ def _budget_problems(est: dict[str, Any] | None) -> list[str]:
         return []
 
 
-# ---------------------------------------------------------------- Generate
-def render_result(entry: dict[str, Any]) -> None:
+# =================================================================== CHAT
+def _push(role: str, kind: str, content: Any = None, **extra: Any) -> None:
+    st.session_state.messages.append({"role": role, "kind": kind, "content": content, **extra})
+
+
+def _reset_chat() -> None:
+    st.session_state.messages = [{"role": "assistant", "kind": "text", "content": GREETING}]
+    st.session_state.chat_stage = "await_jd"
+    st.session_state.pending_jd = ""
+    st.session_state.last_result = None
+    st.session_state.pop("draft_edit", None)
+
+
+def _history_store() -> HistoryStore:
+    return HistoryStore()
+
+
+def _save_to_history(entry: dict[str, Any], draft: str) -> None:
+    result = entry["result"]
+    meta = {"retrieval_score": float(result.get("vector_relevance_score") or 0),
+            "refinements": int(result.get("refinement_count", 0)),
+            "verified": bool(result.get("letter_verified")),
+            "cost_usd": float(result.get("cost_usd") or 0),
+            "run_id": str(result.get("run_id", ""))[:32]}
+    entry["saved_id"] = _history_store().add(entry["company"], _guess_title(entry["jd"]), entry["jd"], draft, meta)
+
+
+def render_result(entry: dict[str, Any], interactive: bool) -> None:
+    """The assistant's reply to a finished run. Only the newest reply is interactive."""
     result, company = entry["result"], entry["company"]
     if result.get("is_fallback"):
-        st.warning(result.get("final_response", "Request could not be completed."))
+        st.warning(result.get("final_response", "I couldn't complete that request."))
     else:
-        st.subheader("Cover letter")
-        st.caption("Edit freely, then re-check that the edits don't claim skills your resume doesn't support.")
-        draft = st.text_area("Draft", key="draft_edit", height=380, label_visibility="collapsed")
-        unverified = [s for s in result.get("unverified_skills", []) if len(s) > 2]
-        if st.button("Re-check grounding", key="recheck"):
-            bad = find_ungrounded_sentences(draft, unverified)
-            if bad:
-                st.warning(f"{len(bad)} sentence(s) claim skills with no resume evidence:")
-                for sentence in bad:
-                    st.code(sentence, language=None)
-            else:
-                st.success("No ungrounded skill claims found in this draft.")
+        letter = result.get("cover_letter", "")
+        chips = [_chip(f"🎯 match {result.get('vector_relevance_score') or 0}", "violet"),
+                 _chip("✅ grounded" if result.get("letter_verified") else "⚠️ not verified",
+                       "green" if result.get("letter_verified") else "amber"),
+                 _chip(f"✏️ {result.get('refinement_count', 0)} refinement(s)", "blue"),
+                 _chip(f"💲 {float(result.get('cost_usd') or 0):.4f}", "pink")]
+        st.markdown("".join(chips), unsafe_allow_html=True)
+        if not interactive:
+            with st.expander(f"Earlier letter · {company}"):
+                st.text(letter)
+            return
+        st.markdown(f"**Here's your cover letter for {_cell(company)}** 🎉")
+        draft = st.session_state.get("draft_edit") or letter
+        with st.container(border=True):
+            st.text(draft)
+
+        a1, a2, a3 = st.columns([1.3, 1, 1])
+        saved_id = entry.get("saved_id")
+        if saved_id:
+            a1.success(f"Saved to history (#{saved_id})")
+        elif a1.button("👍 I'm satisfied: save to history", key="save-hist", type="primary"):
+            try:
+                _save_to_history(entry, draft)
+                st.toast("Saved to your history 📚")
+                st.rerun()
+            except (HistoryError, ValueError) as e:
+                st.error(redact_secrets(e))
+        if a2.button("🔁 Try again", key="try-again"):
+            st.session_state.run_request = (entry["jd"], company)
+            st.rerun()
+        if a3.button("🆕 New letter", key="new-letter"):
+            _reset_chat()
+            st.rerun()
+
+        with st.expander("✏️ Edit the draft and re-check grounding"):
+            st.caption("Edit freely, then re-check that your edits don't claim skills your resume doesn't support.")
+            st.text_area("Draft", key="draft_edit", height=340, label_visibility="collapsed")
+            draft = st.session_state.get("draft_edit") or letter
+            unverified = [s for s in result.get("unverified_skills", []) if len(s) > 2]
+            if st.button("Re-check grounding", key="recheck"):
+                bad = find_ungrounded_sentences(draft, unverified)
+                if bad:
+                    st.warning(f"{len(bad)} sentence(s) claim skills with no resume evidence:")
+                    for sentence in bad:
+                        st.code(sentence, language=None)
+                else:
+                    st.success("No ungrounded skill claims found in this draft.")
 
         d1, d2, d3 = st.columns(3)
-        d1.download_button("Download .txt", draft, file_name="cover_letter.txt", key="dl-txt")
+        d1.download_button("⬇️ .txt", draft, file_name="cover_letter.txt", key="dl-txt")
         try:
-            d2.download_button("Download .docx", letter_to_docx(draft, company), file_name="cover_letter.docx",
-                               key="dl-docx")
+            d2.download_button("⬇️ .docx", letter_to_docx(draft, company), file_name="cover_letter.docx", key="dl-docx")
         except ImportError:
             d2.caption("Install python-docx for .docx export")
         try:
-            d3.download_button("Download .pdf", letter_to_pdf(draft, company), file_name="cover_letter.pdf",
+            d3.download_button("⬇️ .pdf", letter_to_pdf(draft, company), file_name="cover_letter.pdf",
                                mime="application/pdf", key="dl-pdf")
         except ImportError:
             d3.caption("Install fpdf2 for .pdf export")
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Retrieval score", result.get("vector_relevance_score") or 0)
-        c2.metric("Refinements", result.get("refinement_count", 0))
-        c3.metric("Grounding verified", "yes" if result.get("letter_verified") else "no")
-        c4.metric("Cost (USD)", f"{float(result.get('cost_usd') or 0):.4f}")
-        if result.get("run_id"):
-            st.caption(f"Run id: {result['run_id']}")
-
-        with st.expander("Skills-gap panel", expanded=True):
+        with st.expander("🧩 Skills-gap panel", expanded=False):
             detail = result.get("verified_skills_detailed") or {}
             rows = [{"Skill": d.get("skill"), "Status": "✅ verified", "Evidence": d.get("evidence", ""),
                      "In draft": "yes" if _mentions(str(d.get("skill", "")), draft) else "no"}
@@ -279,62 +448,45 @@ def render_result(entry: dict[str, Any]) -> None:
             else:
                 st.info("No skills were analysed for this run.")
 
+    if not interactive:
+        return
+    if result.get("run_id"):
+        st.caption(f"Run id: {result['run_id']}")
     timings = result.get("node_timings", [])
     if timings:
-        with st.expander("Per-agent timing"):
+        with st.expander("⏱️ Per-agent timing"):
             _table(timings, hide_index=True)
     usage = result.get("usage")
     if usage:
-        with st.expander("Token usage"):
+        with st.expander("🔢 Token usage"):
             try:
                 _table(usage if isinstance(usage, list) else [usage], hide_index=True)
             except Exception:  # noqa: BLE001
                 st.json(_scrub(usage), expanded=False)
     events = result.get("healing_log", [])
-    with st.expander(f"Self-healing log ({len(events)} events)", expanded=bool(events)):
+    with st.expander(f"🩹 Self-healing log ({len(events)} events)", expanded=bool(events)):
         for ev in events or ["No recovery actions were needed."]:
             st.text(ev)
 
 
-with tab_run:
-    missing = rt.missing_keys()
-    if missing:
-        st.warning("Missing keys for: " + ", ".join(missing) + ". Add them in **API Keys** or re-assign agents in **Agents & Models**.")
-    statuses = st.session_state.conn_status
-    if statuses:
-        st.caption("Connections: " + "  ".join(
-            f"{LIGHT['ok' if s['ok'] else 'fail']} {ROLES[r]['label']}" for r, s in statuses.items() if r in ROLES))
-    if getattr(rt, "chaos", 0.0):
-        st.warning(f"Chaos mode is ON ({rt.chaos:.0%} fault probability): faults are injected on purpose.")  # type: ignore[attr-defined]
-
-    company = st.text_input("Company name", max_chars=120)
-    jd = st.text_area("Job description", height=280, max_chars=MAX_JD_CHARS)
-    timeout_s = st.slider("Timeout (seconds)", 30, 600, 180, 10,
-                          help="The run is aborted after this long. Streamlit's Stop button (top right while running) also cancels.")
-
+def _execute_run(jd: str, company: str) -> None:
+    """Run the pipeline inside an assistant bubble, then append the reply and rerun."""
     est = _estimate(len(jd))
     problems = _budget_problems(est)
+    if problems:
+        _push("assistant", "text", "I can't run that yet: " + " ".join(_cell(p) for p in problems))
+        st.session_state.chat_stage = "await_jd"
+        st.rerun()
+    note = ""
     if est:
-        e1, e2 = st.columns(2)
-        e1.metric("Estimated cost", f"${float(est.get('total_usd', 0)):.4f}")
-        e2.metric("Estimated tokens", f"{int(est.get('total_tokens', 0)):,}")
-        with st.expander("Estimate by agent"):
-            _table([{"Agent": ROLES[r]["label"] if r in ROLES else r, "Estimated USD": round(_role_usd(v), 5)}
-                          for r, v in (est.get("per_role") or {}).items()], hide_index=True)
-            st.caption("Rough pre-run estimate from prompt sizes and the built-in price table; actual spend is logged after the run.")
-    spend = _spend_rows()
-    if spend:
-        with st.expander("Spend this month vs caps"):
-            _table(spend, hide_index=True)
-    for p in problems:
-        st.error("Budget cap would be exceeded. " + p)
-
-    if st.button("Generate cover letter", type="primary",
-                 disabled=bool(missing) or bool(problems) or not (jd.strip() and company.strip())):
-        st.session_state.last_result = None
+        note = (f"Estimated cost **${float(est.get('total_usd', 0)):.4f}** "
+                f"(~{int(est.get('total_tokens', 0)):,} tokens).")
+    with st.chat_message("assistant", avatar="✨"):
+        if note:
+            st.markdown(note)
         draft_buf: list[str] = []
         progress_lines: list[str] = []
-        with st.status("Agents working…", expanded=True) as status:
+        with st.status("Agents are working…", expanded=True) as status:
             live_box = st.empty()
             progress_box = st.empty()
 
@@ -343,55 +495,217 @@ with tab_run:
                     draft_buf.clear()
                 else:
                     draft_buf.append(text)
-                live_box.text("Live draft:\n" + "".join(draft_buf)) if draft_buf else live_box.empty()
+                # plain statements, not a conditional expression: Streamlit "magic" would st.write() a bare expression
+                if draft_buf:
+                    live_box.text("Writing…\n" + "".join(draft_buf))
+                else:
+                    live_box.empty()
 
             def on_event(ev: dict[str, Any]) -> None:
                 progress_lines.append(f"✓ {ev.get('node', '?')} ({ev.get('ms', '?')} ms)")
                 progress_box.text("\n".join(progress_lines))
 
             result: dict[str, Any] | None = None
+            error: str | None = None
             try:
-                result = asyncio.run(run_pipeline(rt, jd, company, timeout_s=float(timeout_s),
+                result = asyncio.run(run_pipeline(rt, jd, company, timeout_s=float(st.session_state.timeout_s),
                                                   token_sink=sink, on_event=on_event))
                 status.update(label="Done", state="complete")
             except Exception as e:  # noqa: BLE001
-                status.update(label="Failed", state="error")
+                status.update(label="Something went wrong", state="error")
                 if costmod is not None and isinstance(e, getattr(costmod, "BudgetExceeded", ())):
-                    st.error("Budget cap reached: " + redact_secrets(e))
+                    error = "Budget cap reached: " + redact_secrets(e)
                 elif isinstance(e, TimeoutError):
-                    st.error(f"The run timed out after {timeout_s}s. Raise the timeout or switch to faster models.")
+                    error = f"The run timed out after {st.session_state.timeout_s}s. Raise the timeout in the sidebar or use faster models."
                 else:
-                    st.error(redact_secrets(e))
+                    error = redact_secrets(e)
             live_box.empty()
-        if result:
-            st.session_state.last_result = {"company": company, "result": result}
-            if not result.get("is_fallback") and result.get("cover_letter"):
-                st.session_state["draft_edit"] = result["cover_letter"]
-                st.session_state.history = ([{"company": company, "letter": result["cover_letter"],
-                                              "run_id": result.get("run_id", ""),
-                                              "ts": dt.datetime.now().strftime("%Y-%m-%d %H:%M")}]
-                                            + st.session_state.history)[:10]
+    if result is not None:
+        entry = {"company": company, "jd": jd, "result": result}
+        st.session_state.last_result = entry
+        if not result.get("is_fallback") and result.get("cover_letter"):
+            st.session_state["draft_edit"] = result["cover_letter"]
+        _push("assistant", "result", entry=entry)
+    else:
+        _push("assistant", "text", "😕 " + _cell(error or "That didn't work."))
+    st.session_state.chat_stage = "await_jd"
+    st.rerun()
 
-    if st.session_state.last_result:
-        render_result(st.session_state.last_result)
 
-    if st.session_state.history:
-        with st.expander(f"Recent letters ({len(st.session_state.history)}, this session only)"):
-            hist = st.session_state.history
-            for i, h in enumerate(hist):
-                st.markdown(f"**{h['company']}** · {h.get('ts', '')} · `{h.get('run_id', '')}`")
-                prev = next((o for o in hist[i + 1:] if o["company"] == h["company"]), None)
-                if prev is not None:
-                    st.caption("Changes vs the previous letter for this company")
-                    st.code(letter_diff(prev["letter"], h["letter"]), language="diff")
+def page_chat() -> None:
+    st.markdown('<div class="hero"><h1>✨ Let\'s write your cover letter</h1>'
+                '<p>Paste a job description, tell me the company, and I\'ll draft a letter grounded in your resume.</p></div>',
+                unsafe_allow_html=True)
+    missing = rt.missing_keys()
+    if missing:
+        st.warning("Missing keys for: " + ", ".join(missing) + ". Add them in **🔑 API Keys** or re-assign agents in **🤖 Agents & Models**.")
+    statuses = st.session_state.conn_status
+    if statuses:
+        st.markdown("".join(_chip(f"{LIGHT['ok' if s['ok'] else 'fail']} {ROLES[r]['label']}", "grey")
+                            for r, s in statuses.items() if r in ROLES), unsafe_allow_html=True)
+    if getattr(rt, "chaos", 0.0):
+        st.warning(f"Chaos mode is ON ({rt.chaos:.0%} fault probability): faults are injected on purpose.")  # type: ignore[attr-defined]
+
+    msgs = st.session_state.messages
+    last_result_idx = max((i for i, m in enumerate(msgs) if m["kind"] == "result"), default=-1)
+    for i, m in enumerate(msgs):
+        with st.chat_message(m["role"], avatar="🧑‍💼" if m["role"] == "user" else "✨"):
+            if m["role"] == "user":
+                st.markdown('<span class="user-marker"></span>', unsafe_allow_html=True)
+            if m["kind"] == "text":
+                if m["role"] == "user":
+                    st.text(m["content"])
                 else:
-                    st.text(h["letter"][:600] + ("…" if len(h["letter"]) > 600 else ""))
+                    st.markdown(m["content"])
+            elif m["kind"] == "jd":
+                st.markdown(f"📋 **Job description** ({len(m['content']):,} characters)")
+                with st.expander("Show what I pasted"):
+                    st.text(m["content"][:3000] + ("…" if len(m["content"]) > 3000 else ""))
+            elif m["kind"] == "result":
+                render_result(m["entry"], interactive=(i == last_result_idx))
 
-# ----------------------------------------------------------------- Resumes
-with tab_resumes:
+    req = st.session_state.run_request
+    if req:
+        st.session_state.run_request = None
+        _push("user", "text", f"Try again for {req[1]}")
+        _execute_run(*req)
+
+    stage = st.session_state.chat_stage
+    placeholder = ("Paste the job description here…" if stage == "await_jd"
+                   else "Which company is this for?")
+    text = st.chat_input(placeholder, max_chars=MAX_JD_CHARS if stage == "await_jd" else 120, disabled=bool(missing))
+    if not text:
+        return
+    if stage == "await_jd":
+        jd = sanitize_text(text)
+        if len(jd) < MIN_JD_CHARS:
+            _push("user", "text", text[:500])
+            _push("assistant", "text", "That looks a bit short for a job posting. Could you paste the full description "
+                                       "(responsibilities and requirements)?")
+        else:
+            _push("user", "jd", jd)
+            st.session_state.pending_jd = jd
+            st.session_state.chat_stage = "await_company"
+            _push("assistant", "text", "Got it! 🙌 **Which company is this for?**")
+        st.rerun()
+    else:
+        company = sanitize_text(text, 120).strip()
+        if not company:
+            st.rerun()
+        _push("user", "text", company)
+        _execute_run(st.session_state.pending_jd, company)
+
+
+# =================================================================== HISTORY
+def _prev_same_company(store: HistoryStore, e: Any) -> Any:
+    """Most recent older saved letter for the same company (to show what changed)."""
+    for other in store.list(limit=PAGE_SIZE * 5, offset=0):
+        if other.id < e.id and other.company.lower() == e.company.lower():
+            return other
+    return None
+
+
+def page_history() -> None:
+    st.markdown('<div class="hero"><h1>📚 Saved cover letters</h1>'
+                '<p>The letters you were happy with, stored only on this computer. Deleting one erases it permanently.</p></div>',
+                unsafe_allow_html=True)
+    store = _history_store()
+    try:
+        total = store.count()
+    except HistoryError as e:
+        st.error("Could not open the history database: " + redact_secrets(e))
+        return
+    pages = max(1, math.ceil(total / PAGE_SIZE))
+    st.session_state.hist_page = min(max(0, st.session_state.hist_page), pages - 1)
+    page_no = st.session_state.hist_page
+
+    if total == 0:
+        st.info("Nothing saved yet. After a letter is generated, press **👍 I'm satisfied: save to history** "
+                "and it will appear here.")
+        return
+    first, last = page_no * PAGE_SIZE + 1, min(total, (page_no + 1) * PAGE_SIZE)
+    st.markdown(_chip(f"{total} saved", "violet") + _chip(f"showing {first}–{last}", "blue")
+                + _chip(f"page {page_no + 1} of {pages}", "grey"), unsafe_allow_html=True)
+
+    entries = store.list(limit=PAGE_SIZE, offset=page_no * PAGE_SIZE)
+    for e in entries:
+        with st.container(border=True):
+            h1, h2 = st.columns([5, 2])
+            h1.markdown(f"<div class='card-title'>{html.escape(e.company)}</div>", unsafe_allow_html=True)
+            h1.caption(f"{e.job_title} · saved {_pretty_date(e.created_at)}")
+            chips = ""
+            if e.meta.get("verified"):
+                chips += _chip("✅ grounded", "green")
+            if "retrieval_score" in e.meta:
+                chips += _chip(f"🎯 match {e.meta['retrieval_score']:.0f}", "violet")
+            h2.markdown(chips, unsafe_allow_html=True)
+
+            with st.expander("Open letter"):
+                st.code(e.letter, language=None, wrap_lines=True)   # read-only, with a built-in copy button
+                prev = _prev_same_company(store, e)
+                if prev is not None:
+                    st.caption(f"Changes vs the previous saved letter for {_cell(e.company)}")
+                    st.code(letter_diff(prev.letter, e.letter), language="diff")
+                with st.expander("Job description it answered"):
+                    st.text(e.jd[:4000] + ("…" if len(e.jd) > 4000 else ""))
+                d1, d2, d3 = st.columns(3)
+                d1.download_button("⬇️ .txt", e.letter, file_name=f"cover_letter_{e.id}.txt", key=f"htxt-{e.id}")
+                try:
+                    d2.download_button("⬇️ .docx", letter_to_docx(e.letter, e.company),
+                                       file_name=f"cover_letter_{e.id}.docx", key=f"hdocx-{e.id}")
+                except ImportError:
+                    d2.caption("Install python-docx for .docx export")
+                try:
+                    d3.download_button("⬇️ .pdf", letter_to_pdf(e.letter, e.company),
+                                       file_name=f"cover_letter_{e.id}.pdf", mime="application/pdf", key=f"hpdf-{e.id}")
+                except ImportError:
+                    d3.caption("Install fpdf2 for .pdf export")
+
+            if st.session_state.confirm_delete == e.id:
+                st.warning("This permanently erases the letter and its job description from this computer. "
+                           "It cannot be undone.")
+                c1, c2, _ = st.columns([1.4, 1, 3])
+                if c1.button("Yes, erase forever", key=f"hyes-{e.id}", type="primary"):
+                    store.delete(e.id)
+                    st.session_state.confirm_delete = None
+                    st.toast("Letter erased permanently 🗑️")
+                    st.rerun()
+                if c2.button("Cancel", key=f"hno-{e.id}"):
+                    st.session_state.confirm_delete = None
+                    st.rerun()
+            elif st.button("🗑️ Delete permanently", key=f"hdel-{e.id}"):
+                st.session_state.confirm_delete = e.id
+                st.rerun()
+
+    n1, n2, n3 = st.columns([1, 2, 1])
+    if n1.button("◀ Newer", disabled=page_no == 0, key="hist-newer"):
+        st.session_state.hist_page = page_no - 1
+        st.session_state.confirm_delete = None
+        st.rerun()
+    n2.markdown(f"<div style='text-align:center'>{_chip(f'page {page_no + 1} / {pages}', 'grey')}</div>",
+                unsafe_allow_html=True)
+    if n3.button("Older ▶", disabled=page_no >= pages - 1, key="hist-older"):
+        st.session_state.hist_page = page_no + 1
+        st.session_state.confirm_delete = None
+        st.rerun()
+
+    with st.expander("⚠️ Danger zone: erase everything"):
+        st.caption("Type DELETE to permanently erase all saved letters.")
+        word = st.text_input("Confirmation", key="wipe-word", label_visibility="collapsed", placeholder="DELETE")
+        if st.button("Erase all saved letters", key="wipe-all", disabled=word != "DELETE"):
+            removed = store.delete_all()
+            st.session_state.hist_page = 0
+            st.session_state.confirm_delete = None
+            st.toast(f"Erased {removed} letter(s) permanently")
+            st.rerun()
+
+
+# =================================================================== RESUMES
+def page_resumes() -> None:
+    st.subheader("📄 Your resumes")
     st.write("Resumes are PII-redacted before they are embedded and stored.")
     up = st.file_uploader("Upload resume", type=["pdf", "docx", "txt"], accept_multiple_files=False)
-    if up is not None and st.button("Ingest resume"):
+    if up is not None and st.button("Ingest resume", type="primary"):
         data = up.getvalue()
         ok, msg = validate_upload(up.name, data)
         if not ok:
@@ -425,8 +739,10 @@ with tab_resumes:
     except Exception as e:  # noqa: BLE001
         st.info("Connect a vector-store key to list resumes. (" + redact_secrets(e)[:120] + ")")
 
-# ---------------------------------------------------------- Agents & Models
-with tab_agents:
+
+# =================================================================== AGENTS & MODELS
+def page_agents() -> None:
+    st.subheader("🤖 Agents & models")
     st.write("Give each agent its own provider, model and API key. The first entry is primary; "
              "the second is the automatic failover used by the self-healing layer.")
 
@@ -514,8 +830,10 @@ with tab_agents:
         except ValueError as e:
             st.error(str(e))
 
-# ---------------------------------------------------------------- API Keys
-with tab_keys:
+
+# =================================================================== API KEYS
+def page_keys() -> None:
+    st.subheader("🔑 API keys")
     st.write("Keys are encrypted with a master key held in your OS keychain (or your passphrase, if you set one). "
              "Raw keys are never shown again.")
     rows = vault.list()
@@ -556,42 +874,48 @@ with tab_keys:
             except VaultError as e:
                 st.error(str(e))
 
-# -------------------------------------------------------------------- Runs
-with tab_runs:
+
+# =================================================================== RUNS
+def page_runs() -> None:
+    st.subheader("📊 Runs")
     if runlog is None:
         st.info("Run logging is not available in this build.")
-    else:
-        runs = runlog.read_runs()
-        if not runs:
-            st.info("No runs recorded yet. Generate a letter and it will appear here (run ids, timings and cost only; "
-                    "letter text is never logged).")
-        else:
-            st.subheader(f"Latency and cost across {len(runs)} run(s)")
-            pct = _node_percentiles(runs)
-            if pct:
-                _table(pct, hide_index=True)
-            try:
-                summary = _scrub(runlog.summarize_runs(runs))
-                with st.expander("Run summary"):
-                    st.json(summary, expanded=False)
-            except Exception as e:  # noqa: BLE001
-                st.caption("Summary unavailable: " + redact_secrets(e)[:120])
-            cols = ("run_id", "ts", "ok", "fallback", "error_type", "duration_ms", "cost_usd", "tokens_in",
-                    "tokens_out", "healing_events", "letter_verified")
-            recent = [{c: r[c] for c in cols if c in r} for r in runs[-50:]][::-1]
-            st.subheader("Recent runs")
-            _table(recent, hide_index=True)
+        return
+    runs = runlog.read_runs()
+    if not runs:
+        st.info("No runs recorded yet. Generate a letter and it will appear here (run ids, timings and cost only; "
+                "letter text is never logged).")
+        return
+    st.subheader(f"Latency and cost across {len(runs)} run(s)")
+    pct = _node_percentiles(runs)
+    if pct:
+        _table(pct, hide_index=True)
+    try:
+        summary = _scrub(runlog.summarize_runs(runs))
+        with st.expander("Run summary"):
+            st.json(summary, expanded=False)
+    except Exception as e:  # noqa: BLE001
+        st.caption("Summary unavailable: " + redact_secrets(e)[:120])
+    cols = ("run_id", "ts", "ok", "fallback", "error_type", "duration_ms", "cost_usd", "tokens_in",
+            "tokens_out", "healing_events", "letter_verified")
+    recent = [{c: r[c] for c in cols if c in r} for r in runs[-50:]][::-1]
+    st.subheader("Recent runs")
+    _table(recent, hide_index=True)
 
-# ---------------------------------------------------------------- Security
-with tab_security:
+
+# =================================================================== SECURITY
+def page_security() -> None:
+    st.subheader("🛡️ Security")
     st.markdown("""
 - **Keys**: Fernet-encrypted vault; master key in OS keychain (file fallback `0600`), or derived from your passphrase. Not in `.env`, logs, or profile JSON.
 - **Logs & errors**: secret-pattern redaction on all log records and UI errors.
 - **Inputs**: Unicode normalisation, control/bidi-character stripping, length caps, prompt-injection fencing (JD and web research are treated as data).
 - **Uploads**: extension + magic-byte + size checks; filenames sanitised against path traversal; PII redacted before storage.
+- **History**: saved letters live in a local SQLite file only; deleting one overwrites and vacuums it so it is gone from the file.
 - **Network**: UI binds to `127.0.0.1`, XSRF protection on, telemetry off.
 - **Resilience**: retry → provider failover → circuit breaker → graceful degradation; ungrounded skill claims can never ship.
 """)
+    rows = vault.list()
 
     st.subheader("Vault passphrase")
     if not hasattr(vault, "enable_passphrase"):
@@ -632,9 +956,9 @@ with tab_security:
     st.subheader("Key age, last use and rotation")
     if rows:
         _table([{"Key": r["alias"], "Provider": r["provider"], "Created": r.get("created_at", ""),
-                       "Last used": r.get("last_used") or "never", "Age (days)": r.get("age_days", ""),
-                       "Rotation": "⏰ due" if r.get("rotate_due") else "ok",
-                       "Monthly cap (USD)": r.get("monthly_cap_usd") or "none"} for r in rows], hide_index=True)
+                 "Last used": r.get("last_used") or "never", "Age (days)": r.get("age_days", ""),
+                 "Rotation": "⏰ due" if r.get("rotate_due") else "ok",
+                 "Monthly cap (USD)": r.get("monthly_cap_usd") or "none"} for r in rows], hide_index=True)
         if hasattr(vault, "set_cap"):
             with st.form("cap-edit"):
                 _alias = st.selectbox("Key", [r["alias"] for r in rows])
@@ -646,6 +970,10 @@ with tab_security:
                         st.rerun()
                     except VaultError as e:
                         st.error(str(e))
+        spend = _spend_rows()
+        if spend:
+            with st.expander("Spend this month vs caps"):
+                _table(spend, hide_index=True)
     else:
         st.info("No keys stored yet.")
 
@@ -667,3 +995,11 @@ with tab_security:
                     st.success("Settings saved.")
                 except ValueError as e:
                     st.error(str(e))
+
+
+# =================================================================== router
+_PAGE_RENDERERS = {
+    PAGE_CHAT: page_chat, PAGE_HISTORY: page_history, PAGE_RESUMES: page_resumes, PAGE_AGENTS: page_agents,
+    PAGE_KEYS: page_keys, PAGE_RUNS: page_runs, PAGE_SECURITY: page_security,
+}
+_PAGE_RENDERERS[page]()   # a call statement; its (None) result is never passed to st.write
