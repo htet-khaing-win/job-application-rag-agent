@@ -168,14 +168,17 @@ delete_resume_from_pinecone("resume.pdf")
 ```bash
 streamlit run app.py
 ```
-It binds to `127.0.0.1` only.
+It binds to `127.0.0.1` only. The interface is a colourful, chat-style app on a light theme (the palette lives in `.streamlit/config.toml`; gradients and chat bubbles are static CSS in `app.py`, and no user text is ever placed into HTML unescaped). Pages are in the sidebar:
 
-- **Generate:** live view of the writer's draft as it streams in, per-agent progress, a pre-run cost/token estimate, spend-this-month vs per-key caps (the run is blocked if a cap would be exceeded), a run timeout, an editable draft with **Re-check grounding** (flags sentences that claim skills your resume doesn't support), a skills-gap table with the evidence line for each verified skill, `.txt` / `.docx` / `.pdf` export, and recent-letter history with a diff against the previous letter for the same company. Streamlit's own Stop button cancels a run.
-- **Resumes:** upload, list and delete resumes.
-- **Agents & Models:** presets, per-agent provider/model/key, a **Test connection** button per agent (and **Test all**) with status lights, and a side-by-side profile comparison that lists only the differences.
-- **API Keys / Security:** key age, last use and rotation reminders, per-key monthly spend caps, an optional **vault passphrase** (lock/unlock; while locked the app shows only the unlock form), and editable retrieval settings (`alpha`, max resumes searched, top-k) saved in your profile.
-- **Runs:** run ids, durations, cost and p50/p95 per agent from the local run log. The log stores timings, token counts and cost only, never letter or resume text.
-- **Chaos mode** (sidebar): a demo that injects random provider faults so you can watch the self-healing log recover. Leave it off for real use.
+- **💬 Chat:** paste a job description into the chat box, answer "which company?", and the agents reply with a cover letter. The reply shows colour chips (match score, grounded, refinements, cost), a live view of the draft as it streams in, and buttons to **save it to history**, **try again** or start a **new letter**. Below it: an editable draft with **Re-check grounding** (flags sentences that claim skills your resume doesn't support), `.txt` / `.docx` / `.pdf` export, a skills-gap table with the evidence line for each verified skill, per-agent timing, token usage and the self-healing log. Before each run it shows a cost estimate, and it blocks the run if a per-key monthly cap would be exceeded. Streamlit's own Stop button cancels a run; the timeout is under **Run options** in the sidebar.
+- **📚 History:** the letters you were satisfied with, stored in a local SQLite file (`~/.job_application_agent/history.db`). Nothing is saved until you press **👍 I'm satisfied: save to history**. Letters are listed newest first, **10 per page** with Newer / Older buttons, each with a copy-able read-only letter, the job description it answered, downloads and a diff against your previous saved letter for the same company. **🗑️ Delete permanently** asks for confirmation, then overwrites and compacts the database so the text is gone from the file, not just hidden. A "danger zone" erases everything after you type `DELETE`.
+- **📄 Resumes:** upload, list and delete resumes.
+- **🤖 Agents & Models:** presets, per-agent provider/model/key, a **Test connection** button per agent (and **Test all**) with status lights, and a side-by-side profile comparison that lists only the differences.
+- **🔑 API Keys / 🛡️ Security:** key age, last use and rotation reminders, per-key monthly spend caps, an optional **vault passphrase** (lock/unlock; while locked the app shows only the unlock form), and editable retrieval settings (`alpha`, max resumes searched, top-k) saved in your profile.
+- **📊 Runs:** run ids, durations, cost and p50/p95 per agent from the local run log. The log stores timings, token counts and cost only, never letter or resume text.
+- **🧪 Chaos mode** (sidebar): a demo that injects random provider faults so you can watch the self-healing log recover. Leave it off for real use.
+
+History is local-only and holds your own letters and the job descriptions they answered. Secret-shaped strings are redacted before storage, and API keys are never stored. File-level erasure cannot defeat forensic recovery of disk blocks the filesystem has already released.
 
 Tables are rendered as escaped markdown, not `st.dataframe`, so resume text can't inject markup and the GUI doesn't depend on pandas.
 
@@ -294,7 +297,8 @@ pytest
 ```
 job-application-rag-agent/
 ├── main.py            # CLI entry point (+ add-key / list-keys / remove-key)
-├── app.py             # Streamlit GUI
+├── app.py             # Streamlit GUI (chat-style)
+├── history.py         # local SQLite history of saved letters (10 per page, permanent delete)
 ├── pipeline.py        # validated entry point: timeout, budget check, run log
 ├── graph.py           # LangGraph workflow and routing
 ├── subagents.py       # sub-agents and the self-healing Supervisor
