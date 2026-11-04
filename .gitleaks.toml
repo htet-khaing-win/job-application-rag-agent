@@ -1,0 +1,14 @@
+title = "job-application-agent gitleaks config"
+
+[extend]
+useDefault = true   # keep every default rule active for the whole repository
+
+# The test suite and the fake-model harness deliberately plant FAKE credentials (for example
+# "sk-PLANTEDSECRET...", "AIzaSyFAKE...") to prove that redaction, failover and the vault never leak
+# them. None is a real key. Only these paths are exempt; production code, docs and config are scanned.
+[allowlist]
+description = "Synthetic fake keys used as test fixtures"
+paths = [
+  '''^tests/''',
+  '''^evals/fakes\.py$''',
+]
