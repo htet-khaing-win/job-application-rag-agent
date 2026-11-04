@@ -25,7 +25,7 @@ ignore_missing_imports = true
 check_untyped_defs = true
 # Scope grows as modules are annotated: database.py, pipeline.py and evals/ still have type errors
 # (see `mypy database.py pipeline.py evals`). follow_imports=silent keeps those out of this gate.
-files = ["security.py", "vault.py", "providers.py", "resilience.py", "runtime.py", "cost.py", "runlog.py", "cache.py", "export.py", "database.py", "pipeline.py"]
+files = ["security.py", "vault.py", "providers.py", "resilience.py", "runtime.py", "cost.py", "runlog.py", "cache.py", "export.py", "database.py", "pipeline.py", "history.py"]
 follow_imports = "silent"
 
 [tool.pytest.ini_options]
