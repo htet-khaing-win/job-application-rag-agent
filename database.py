@@ -12,6 +12,68 @@ BM25_PATH = "utilities/fitted_bm25.json"
 
 _pii_guard = None
 _bm25 = None
+_bm25_mode = "fitted"
+
+DEFAULT_SETTINGS = {"alpha": 0.4, "max_resumes": 10, "top_k": 10}
+_QUERY_CONCURRENCY = 8
+
+
+def set_bm25_mode(mode: str) -> None:
+    """"fitted" (default; uses utilities/fitted_bm25.json if present) or "cold" (generic encoder).
+
+    Evals should use "cold" when the fitted encoder was trained on the corpus being queried,
+    otherwise sparse scores leak corpus statistics.
+    """
+    global _bm25, _bm25_mode
+    if mode not in ("fitted", "cold"):
+        raise ValueError("bm25 mode must be 'fitted' or 'cold'")
+    if mode != _bm25_mode:
+        _bm25 = None
+    _bm25_mode = mode
+
+
+def get_settings() -> dict:
+    """Retrieval settings from the active runtime profile (alpha, max_resumes, top_k)."""
+    merged = dict(DEFAULT_SETTINGS)
+    try:
+        extra = getattr(get_runtime(), "settings", None)
+        if isinstance(extra, dict):
+            merged.update({k: v for k, v in extra.items() if k in merged and v is not None})
+    except Exception:  # noqa: BLE001 - no runtime (tests/scripts): defaults
+        pass
+    return merged
+
+
+def _embedding_model_key() -> str:
+    try:
+        b = get_runtime().profile.roles["embeddings"][0]
+        return f"{b.provider}:{b.model}"
+    except Exception:  # noqa: BLE001
+        return "default"
+
+
+def select_fair_matches(matches_by_ns: dict, top_k: int) -> list:
+    """Merge per-resume matches so no single resume can crowd the others out entirely.
+
+    Half the slots (at most one per resume) go to each resume's best chunk, ranked by that
+    chunk's score; the rest are filled globally by score. Output is sorted by score.
+    """
+    pool = [(ns, m) for ns, ms in matches_by_ns.items() for m in ms]
+    if not pool:
+        return []
+    chosen, seen = [], set()
+    bests = sorted(((ns, max(ms, key=lambda m: m["score"])) for ns, ms in matches_by_ns.items() if ms),
+                   key=lambda t: t[1]["score"], reverse=True)
+    for ns, m in bests[: max(1, top_k // 2)]:
+        chosen.append(m)
+        seen.add(m["id"])
+    for ns, m in sorted(pool, key=lambda t: t[1]["score"], reverse=True):
+        if len(chosen) >= top_k:
+            break
+        if m["id"] not in seen:
+            chosen.append(m)
+            seen.add(m["id"])
+    return sorted(chosen, key=lambda m: m["score"], reverse=True)[:top_k]
 
 
 def get_pii_guard():
@@ -26,7 +88,7 @@ def get_bm25():
     global _bm25
     if _bm25 is None:
         from pinecone_text.sparse import BM25Encoder
-        if os.path.exists(BM25_PATH):
+        if _bm25_mode == "fitted" and os.path.exists(BM25_PATH):
             _bm25 = BM25Encoder()
             _bm25.load(BM25_PATH)
         else:
@@ -82,7 +144,7 @@ def split_by_sections(text: str):
 
     return sections
 
-_index_cache = {}
+_index_cache: dict = {}
 
 
 def get_index(index_name: str, dimension: int = 1536):
@@ -314,6 +376,18 @@ def validate_resume_file(file_path):
     
     return True, "Completed"
 
+def hybrid_scale(dense, sparse, alpha: float):
+    """Convex-combine dense and sparse query vectors: dense*alpha, sparse*(1-alpha).
+
+    Pinecone's query() has no `alpha` argument (it would be ignored or rejected), so the
+    documented approach is to scale the query vectors client-side. alpha=1 is dense-only.
+    """
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError("alpha must be within [0, 1]")
+    return ([float(v) * alpha for v in dense],
+            {"indices": list(sparse["indices"]), "values": [float(v) * (1.0 - alpha) for v in sparse["values"]]})
+
+
 @traceable(run_type="tool", name="pinecone_retrieval")
 async def retrieve_resumes_node(state: GraphState) -> dict:
     """
@@ -334,13 +408,17 @@ async def retrieve_resumes_node(state: GraphState) -> dict:
     bm25 = get_bm25()
     index = get_pinecone_index()
 
-    # Parallelize embedding generation
+    from cache import cached_embed_query
+    cfg = get_settings()
+    alpha, top_k = float(cfg["alpha"]), int(cfg["top_k"])
+    max_resumes = max(1, int(cfg["max_resumes"]))
+
+    # Parallelize embedding generation (query embeddings are cached per model+text)
     dense_query, sparse_query, resume_list = await asyncio.gather(
-        asyncio.to_thread(embeddings.embed_query, state.cleaned_jd),
+        asyncio.to_thread(cached_embed_query, embeddings, _embedding_model_key(), state.cleaned_jd),
         asyncio.to_thread(bm25.encode_queries, state.cleaned_jd),
         asyncio.to_thread(list_stored_resumes)
     )
-
 
     if not resume_list:
         print(" No resumes found in database.")
@@ -351,48 +429,37 @@ async def retrieve_resumes_node(state: GraphState) -> dict:
             "vector_relevance_score": 0.0
         }
 
-    capped_list = resume_list[:2]
-    # Helper function for Pinecone query
+    namespaces = resume_list[:max_resumes]
+    sem = asyncio.Semaphore(_QUERY_CONCURRENCY)
+
+    hybrid_dense, hybrid_sparse = hybrid_scale(dense_query, sparse_query, alpha)
+
     async def query_namespace(namespace):
-        return await asyncio.to_thread(
-            index.query,
-            vector=dense_query,
-            sparse_vector=sparse_query,
-            top_k=10,
-            include_metadata=True,
-            alpha=0.4,
-            namespace=namespace
-        )
-    
-    # Gather all queries in parallel
-    results = await asyncio.gather(
-        *[query_namespace(ns) for ns in capped_list],
-        return_exceptions=True
-    )
-    
-    all_matches = []
-    for i, result in enumerate(results):
+        async with sem:
+            return await asyncio.to_thread(
+                index.query,
+                vector=hybrid_dense,
+                sparse_vector=hybrid_sparse,
+                top_k=top_k,
+                include_metadata=True,
+                namespace=namespace
+            )
+
+    results = await asyncio.gather(*[query_namespace(ns) for ns in namespaces], return_exceptions=True)
+
+    by_ns = {}
+    for ns, result in zip(namespaces, results):
         if isinstance(result, Exception):
-            print(f"Error querying namespace {capped_list[i]}: {redact_secrets(result)}")
+            print(f"Error querying namespace {ns}: {redact_secrets(result)}")
         else:
-            all_matches.extend(result.get('matches', []))
+            by_ns[ns] = list(result.get('matches', []))  # type: ignore[union-attr]
 
-    if not all_matches:
-        return {
-                "retrieved_chunks": [], 
-                "vector_relevance_score": 0.0, 
-                "grading_feedback": "No relevant matches."}
-
-    # Aggregation per Resume (Diversity)
-    sorted_matches = sorted(all_matches, key=lambda x: x['score'], reverse=True)
-    final_matches = sorted_matches[:10]
-
+    final_matches = select_fair_matches(by_ns, top_k)
     if not final_matches:
-        print(" No matches passed the relevance threshold.")
         return {
-            "retrieved_chunks": [], 
-            "grading_feedback": "Mismatch: No resumes are sufficiently relevant to this Job Description.",
-            "vector_relevance_score": 0.0 # Fallback Signal
+            "retrieved_chunks": [],
+            "vector_relevance_score": 0.0,
+            "grading_feedback": "No relevant matches.",
         }
 
     retrieved_chunks = [

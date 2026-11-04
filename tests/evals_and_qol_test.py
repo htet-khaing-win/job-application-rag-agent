@@ -1,5 +1,4 @@
 import asyncio
-import json
 
 import pytest
 
@@ -95,7 +94,9 @@ def test_check_connection_success(tmp_path, monkeypatch):
 
 # --- per-node timings --------------------------------------------------------------
 def test_pipeline_records_node_timings(monkeypatch):
-    import node, resilience, subagents
+    import node
+    import resilience
+    import subagents
     from graph import build_graph
     from resilience import reset_breakers, start_heal_log
     from self_healing_pipeline_test import JD, Scripted

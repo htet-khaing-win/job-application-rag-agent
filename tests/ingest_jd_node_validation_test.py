@@ -27,7 +27,6 @@ USAGE: pytest tests/ingest_jd_node_validation_test.py -v
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-import pytest
 from unittest.mock import Mock
 from state import GraphState
 from node import ingest_jd_node

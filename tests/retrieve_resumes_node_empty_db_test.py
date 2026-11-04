@@ -1,6 +1,6 @@
 """Empty vector DB: retrieval must report no_resumes and never query Pinecone."""
 import asyncio
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from state import GraphState
 from database import retrieve_resumes_node

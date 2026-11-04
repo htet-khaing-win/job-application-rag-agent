@@ -1,19 +1,21 @@
-from typing import List, Dict, Any, Optional, Annotated
+from operator import add
+from typing import Annotated, Any
+
 from pydantic import BaseModel, Field
-from operator import or_, add
+
 
 class GraphState(BaseModel):
     job_description: str
     is_valid_jd: bool = False
     cleaned_jd: str = ""
-    retrieved_chunks: List[Dict[str, Any]] = Field(default_factory=list)
+    retrieved_chunks: list[dict[str, Any]] = Field(default_factory=list)
     candidate_summary: str = ""
     resume_summary: str = ""
     cover_letter: str = ""
     critique_feedback: str = ""
     needs_rewrite: bool = False
     grading_feedback: str = ""
-    needs_refinement: Annotated[bool, or_] = False 
+    needs_refinement: bool = False
     refinement_count: int = 0
     error_type: str = ""            
     error_message: str = ""         
@@ -23,15 +25,17 @@ class GraphState(BaseModel):
     company_name: str = ""
     company_research: str = ""
     company_research_success: bool = False
-    vector_relevance_score: Optional[float] = None
-    verified_skills: List[str] = Field(default_factory=list)
-    unverified_skills: List[str] = Field(default_factory=list)
-    verified_skills_detailed: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict) 
-    refinement_edits: List[Dict[str, str]] = Field(default_factory=list)
+    vector_relevance_score: float | None = None
+    verified_skills: list[str] = Field(default_factory=list)
+    unverified_skills: list[str] = Field(default_factory=list)
+    verified_skills_detailed: dict[str, list[dict[str, Any]]] = Field(default_factory=dict) 
+    refinement_edits: list[dict[str, str]] = Field(default_factory=list)
     verification_score: int = 100
     joined_context: bool = False
     ready_to_submit: bool = False
-    healing_log: Annotated[List[str], add] = Field(default_factory=list)
+    healing_log: Annotated[list[str], add] = Field(default_factory=list)
     verification_attempts: int = 0
     letter_verified: bool = False
-    node_timings: Annotated[List[Dict[str, Any]], add] = Field(default_factory=list)
+    node_timings: Annotated[list[dict[str, Any]], add] = Field(default_factory=list)
+    node_usage: Annotated[list[dict[str, Any]], add] = Field(default_factory=list)
+    company_research_cached: bool = False

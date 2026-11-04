@@ -1,9 +1,33 @@
-from state import GraphState
-from langgraph.graph import StateGraph, END, START
-from subagents import (Supervisor, JDAnalystAgent, ResearchAgent, RetrieverAgent, AnalystAgent,
-                       WriterAgent, CriticAgent, EditorAgent, FactCheckerAgent,
-                       ContextJoinAgent, FallbackAgent)
 import asyncio
+from collections.abc import Iterable
+
+from langgraph.graph import END, START, StateGraph
+
+from state import GraphState
+from subagents import (
+    AnalystAgent,
+    ContextJoinAgent,
+    CriticAgent,
+    EditorAgent,
+    FactCheckerAgent,
+    FallbackAgent,
+    JDAnalystAgent,
+    ResearchAgent,
+    RetrieverAgent,
+    Supervisor,
+    WriterAgent,
+)
+
+VALID_ABLATIONS = frozenset({"fact_checker", "critique_refine", "research", "failover"})
+
+
+def validate_ablate(ablate: Iterable[str]) -> frozenset:
+    """Normalise and validate ablation names ("failover" is applied by the pipeline, not the graph)."""
+    names = frozenset(ablate or ())
+    unknown = names - VALID_ABLATIONS
+    if unknown:
+        raise ValueError(f"Unknown ablation(s): {sorted(unknown)}; valid: {sorted(VALID_ABLATIONS)}")
+    return names
 
 async def should_refine_letter(state: GraphState) -> str:
     """
@@ -62,7 +86,7 @@ def route_after_write(state: GraphState) -> str:
     return "fallback_handler" if state.error_type == "generation_failed" or not state.cover_letter.strip() else "verify_letter"
 
 
-def build_graph(generator_llm=None, critic_llm=None):
+def build_graph(generator_llm=None, critic_llm=None, ablate: Iterable[str] = frozenset()):
     """
     Constructs the self-healing LangGraph workflow.
 
@@ -70,24 +94,28 @@ def build_graph(generator_llm=None, critic_llm=None):
     By default each agent resolves its own model + API key from the active runtime profile
     (see runtime.py). Passing generator_llm / critic_llm pins models explicitly (tests, A/B).
     """
+    ablate = validate_ablate(ablate)
     pinned = generator_llm is not None or critic_llm is not None
     gen, crit = generator_llm, critic_llm
     sup = Supervisor()
 
     agents = {
         "ingest_jd": JDAnalystAgent(crit if pinned else None),
-        "research_company": ResearchAgent(),
+        "research_company": ResearchAgent(disabled="research" in ablate),
         "retrieve_resumes": RetrieverAgent(),
         "generate_summary": AnalystAgent(),
         "join_context": ContextJoinAgent(),
         "write_cover_letter": WriterAgent(gen if pinned else None),
-        "verify_letter": FactCheckerAgent(crit if pinned else None),
+        "verify_letter": FactCheckerAgent(crit if pinned else None, passthrough="fact_checker" in ablate),
         "critique_letter": CriticAgent(crit if pinned else None),
         "refine_letter": EditorAgent(gen if pinned else None),
         "fallback_handler": FallbackAgent(),
     }
 
     workflow = StateGraph(GraphState)
+    if "critique_refine" in ablate:  # ship the verified draft without critique / refinement
+        agents.pop("critique_letter")
+        agents.pop("refine_letter")
     for name, agent in agents.items():
         workflow.add_node(name, sup.guard(agent))
 
@@ -111,16 +139,18 @@ def build_graph(generator_llm=None, critic_llm=None):
         "write_cover_letter", route_after_write,
         {"verify_letter": "verify_letter", "fallback_handler": "fallback_handler"},
     )
-    workflow.add_edge("verify_letter", "critique_letter")
-
-    workflow.add_conditional_edges(
-        "critique_letter", should_refine_letter,
-        {"refine_letter": "refine_letter", END: END},
-    )
-    workflow.add_conditional_edges(
-        "refine_letter", route_after_refine,
-        {"critique_letter": "critique_letter", END: END},
-    )
+    if "critique_refine" in ablate:
+        workflow.add_edge("verify_letter", END)
+    else:
+        workflow.add_edge("verify_letter", "critique_letter")
+        workflow.add_conditional_edges(
+            "critique_letter", should_refine_letter,
+            {"refine_letter": "refine_letter", END: END},
+        )
+        workflow.add_conditional_edges(
+            "refine_letter", route_after_refine,
+            {"critique_letter": "critique_letter", END: END},
+        )
 
     workflow.add_edge("fallback_handler", END)
     return workflow.compile()
