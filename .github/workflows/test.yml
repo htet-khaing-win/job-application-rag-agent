@@ -88,6 +88,6 @@ jobs:
       - name: Secret scan (gitleaks)
         # github.token is the short-lived built-in token the action needs to annotate pull requests;
         # it is not a repository secret. Organisation-owned repos also need a gitleaks licence.
-        uses: gitleaks/gitleaks-action@v2.3.6
+        uses: gitleaks/gitleaks-action@v3.0.0
         env:
           GITHUB_TOKEN: ${{ github.token }}
