@@ -54,7 +54,7 @@ def test_state_validation_failure():
     """Ensures GraphState rejects invalid data (e.g., string where number is expected)."""
     invalid_data = {
         "job_description": "Data Scientist",
-        "relevance_score": "EXCELLENT"  # This should be a float/int
+        "vector_relevance_score": "EXCELLENT"  # This should be a float
     }
     with pytest.raises(ValidationError):
         GraphState(**invalid_data)

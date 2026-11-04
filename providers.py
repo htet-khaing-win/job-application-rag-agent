@@ -89,16 +89,16 @@ def build_chat_model(provider: str, model: str, key: Optional[str], temperature:
         try:
             if provider == "gemini":
                 from langchain_google_genai import ChatGoogleGenerativeAI
-                return ChatGoogleGenerativeAI(model=model, temperature=temperature, api_key=key,
-                                              max_retries=0, timeout=90)
+                gkw: Dict[str, Any] = dict(model=model, temperature=temperature, api_key=key, max_retries=0, timeout=90)
+                return ChatGoogleGenerativeAI(**gkw)
             if provider == "openai":
                 from langchain_openai import ChatOpenAI
-                return ChatOpenAI(model=model, temperature=temperature, api_key=key,
-                                  max_retries=0, timeout=90)
+                okw: Dict[str, Any] = dict(model=model, temperature=temperature, api_key=key, max_retries=0, timeout=90)
+                return ChatOpenAI(**okw)
             if provider == "anthropic":
                 from langchain_anthropic import ChatAnthropic
-                return ChatAnthropic(model=model, temperature=temperature, api_key=key,
-                                     max_retries=0, timeout=90)
+                akw: Dict[str, Any] = dict(model=model, temperature=temperature, api_key=key, max_retries=0, timeout=90)
+                return ChatAnthropic(**akw)
             if provider == "ollama":
                 from langchain_ollama import ChatOllama
                 return ChatOllama(model=model, temperature=temperature)
@@ -119,10 +119,12 @@ def build_embeddings(provider: str, model: str, key: Optional[str]) -> Any:
         try:
             if provider == "openai":
                 from langchain_openai import OpenAIEmbeddings
-                return OpenAIEmbeddings(model=model, api_key=key)
+                oekw: Dict[str, Any] = dict(model=model, api_key=key)
+                return OpenAIEmbeddings(**oekw)
             if provider == "gemini":
                 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-                return GoogleGenerativeAIEmbeddings(model=model, google_api_key=key)
+                gekw: Dict[str, Any] = dict(model=model, google_api_key=key)
+                return GoogleGenerativeAIEmbeddings(**gekw)
             if provider == "ollama":
                 from langchain_ollama import OllamaEmbeddings
                 return OllamaEmbeddings(model=model)
